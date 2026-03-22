@@ -1,25 +1,22 @@
 """DeepSeek Web API routes."""
 
-import json
 import logging
 
 from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-import httpx
+from fastapi.responses import StreamingResponse
 
-from ..core.auth import get_auth_headers
-from ..core.pow_service import get_pow_response
-from ..core.session_store import SessionStore
-from ..core.config import DEEPSEEK_HOST
+from .chat_completions_service import (
+    stream_chat_completion,
+    create_session_on_deepseek,
+    delete_session as delete_session_service,
+    create_session,
+    upload_file,
+    fetch_files,
+    get_history_messages,
+)
 
-# API path constants
-_PATH_CREATE_SESSION = "api/v0/chat_session/create"
-_PATH_DELETE_SESSION = "api/v0/chat_session/delete"
-_PATH_COMPLETION = "api/v0/chat/completion"
-_PATH_CREATE_POW = "api/v0/chat/create_pow_challenge"
-_PATH_UPLOAD_FILE = "api/v0/file/upload_file"
-_PATH_FETCH_FILES = "api/v0/file/fetch_files"
-_PATH_HISTORY_MESSAGES = "api/v0/chat/history_messages"
+# API path constants - kept for reference, actual paths defined in chat_completions_service
 
 logger = logging.getLogger("deepseek_web_api")
 
@@ -33,148 +30,39 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-DEEPSEEK_BASE_URL = f"https://{DEEPSEEK_HOST}"
-session_store = SessionStore.get_instance()
-
-
-def parse_sse_response_message_id(content: bytes) -> int | None:
-    """Parse SSE stream to extract response_message_id from ready event."""
-    try:
-        text = content.decode("utf-8")
-        for line in text.split("\n"):
-            line = line.strip()
-            if line.startswith("data:") and "response_message_id" in line:
-                # Extract response_message_id from ready event: data: {"request_message_id":1,"response_message_id":2}
-                data_str = line[5:].strip()  # Remove "data:" prefix
-                data = json.loads(data_str)
-                return data.get("response_message_id")
-    except Exception:
-        pass
-    return None
-
-
-def extract_chat_session_id(resp_body: bytes) -> str | None:
-    """Extract chat_session_id from DeepSeek API response."""
-    data = json.loads(resp_body)
-    return data.get("data", {}).get("biz_data", {}).get("id")
-
-
-async def proxy_to_deepseek(method, path, headers=None, json_data=None, params=None, content=None, files=None):
-    """Proxy request to DeepSeek backend."""
-    url = f"{DEEPSEEK_BASE_URL}/{path}"
-    auth_headers = get_auth_headers()
-    if headers:
-        headers = {**headers, **auth_headers}
-    else:
-        headers = auth_headers
-    headers["Host"] = DEEPSEEK_HOST
-
-    # For multipart file uploads, don't set Content-Type - let httpx generate it with boundary
-    if files is not None and "Content-Type" in headers:
-        del headers["Content-Type"]
-
-    async with httpx.AsyncClient(timeout=120.0) as client:
-        resp = await client.request(
-            method=method,
-            url=url,
-            headers=headers,
-            json=json_data,
-            params=params,
-            content=content,
-            files=files,
-        )
-        return Response(
-            content=resp.content,
-            status_code=resp.status_code,
-            headers=dict(resp.headers),
-        )
-
-
-# ============ Routes ============
-
-async def create_session_on_deepseek() -> str | None:
-    """Create session on DeepSeek backend and return the chat_session_id."""
-    resp = await proxy_to_deepseek(
-        "POST",
-        _PATH_CREATE_SESSION,
-        json_data={"agent": "chat"},
-    )
-    if resp.body:
-        try:
-            csid = extract_chat_session_id(resp.body)
-            if csid:
-                session_store.create_session(csid)
-                return csid
-        except Exception:
-            pass
-    return None
-
 
 @app.api_route("/v0/chat/completion", methods=["POST"])
 async def completion(request: Request):
-    """Send chat completion."""
+    """Send chat completion with streaming SSE response."""
     body = await request.json()
     prompt = body.pop("prompt")
     search_enabled = body.pop("search_enabled", True)
     thinking_enabled = body.pop("thinking_enabled", True)
     client_chat_session_id = body.pop("chat_session_id", None)
+    ref_file_ids = body.get("ref_file_ids", [])
 
-    new_session_created = False
-
-    # Determine chat_session_id
-    if client_chat_session_id:
-        chat_session_id = client_chat_session_id
-        parent_message_id = session_store.get_parent_message_id(chat_session_id)
-        if not session_store.has_session(chat_session_id):
-            session_store.create_session(chat_session_id)
-            parent_message_id = None
-    else:
-        # No chat_session_id: create session on DeepSeek first
+    # Pre-create session if needed to return session_id in header
+    response_headers = {}
+    if client_chat_session_id is None:
         chat_session_id = await create_session_on_deepseek()
-        parent_message_id = None
-        new_session_created = True
-
-    # Get PoW
-    pow_response = get_pow_response()
-
-    # Build payload for DeepSeek
-    payload = {
-        "chat_session_id": chat_session_id,
-        "parent_message_id": parent_message_id,
-        "preempt": False,
-        "prompt": prompt,
-        "ref_file_ids": body.get("ref_file_ids", []),
-        "search_enabled": search_enabled,
-        "thinking_enabled": thinking_enabled,
-    }
-
-    headers = {"x-ds-pow-response": pow_response} if pow_response else {}
-
-    # Proxy to DeepSeek
-    deepseek_resp = await proxy_to_deepseek(
-        "POST",
-        _PATH_COMPLETION,
-        headers=headers,
-        json_data=payload,
-    )
-
-    # Extract response_message_id from SSE and update session_store
-    if deepseek_resp.body:
-        msg_id = parse_sse_response_message_id(deepseek_resp.body)
-        if msg_id and chat_session_id:
-            session_store.update_parent_message_id(chat_session_id, msg_id)
-
-    # If we created a new session, add header with chat_session_id
-    if new_session_created and chat_session_id:
-        response_headers = dict(deepseek_resp.headers)
+        client_chat_session_id = chat_session_id
         response_headers["X-Chat-Session-Id"] = chat_session_id
-        return Response(
-            content=deepseek_resp.body,
-            status_code=deepseek_resp.status_code,
-            headers=response_headers,
-        )
 
-    return deepseek_resp
+    async def stream_and_set_header():
+        async for chunk in stream_chat_completion(
+            prompt=prompt,
+            chat_session_id=client_chat_session_id,
+            search_enabled=search_enabled,
+            thinking_enabled=thinking_enabled,
+            ref_file_ids=ref_file_ids,
+        ):
+            yield chunk
+
+    return StreamingResponse(
+        stream_and_set_header(),
+        media_type="text/event-stream",
+        headers=response_headers if response_headers else None,
+    )
 
 
 @app.api_route("/v0/chat/delete", methods=["POST"])
@@ -183,47 +71,18 @@ async def delete_session(request: Request):
     body = await request.json()
     chat_session_id = body.get("chat_session_id")
 
-    session_store.delete_session(chat_session_id)
-
-    return await proxy_to_deepseek(
-        "POST",
-        _PATH_DELETE_SESSION,
-        json_data={"chat_session_id": chat_session_id},
-    )
+    return await delete_session_service(chat_session_id)
 
 
 @app.api_route("/v0/chat/create_session", methods=["POST"])
-async def create_session(request: Request):
+async def create_session_route(request: Request):
     """Create new session."""
     body = await request.json()
-    resp = await proxy_to_deepseek(
-        "POST",
-        _PATH_CREATE_SESSION,
-        json_data=body,
-    )
-
-    # Parse returned chat_session_id, store it, and return it explicitly
-    if resp.body:
-        try:
-            chat_session_id = extract_chat_session_id(resp.body)
-            if chat_session_id:
-                session_store.create_session(chat_session_id)
-                # Return with explicit chat_session_id at top level
-                data = json.loads(resp.body)
-                data["chat_session_id"] = chat_session_id
-                return Response(
-                    content=json.dumps(data),
-                    status_code=resp.status_code,
-                    headers={"Content-Type": "application/json"},
-                )
-        except Exception:
-            pass
-
-    return resp
+    return await create_session(body)
 
 
 @app.api_route("/v0/chat/upload_file", methods=["POST"])
-async def upload_file(request: Request):
+async def upload_file_route(request: Request):
     """Upload file."""
     form = await request.form()
     file = form.get("file")
@@ -231,45 +90,23 @@ async def upload_file(request: Request):
         return Response(content="No file provided", status_code=400)
 
     file_content = await file.read()
-    files = {"file": (file.filename, file_content, file.content_type)}
-
-    # Get PoW for file upload endpoint
-    pow_response = get_pow_response(target_path="/api/v0/file/upload_file")
-    headers = {
-        "x-ds-pow-response": pow_response,
-        "x-file-size": str(len(file_content)),
-    } if pow_response else {}
-
-    return await proxy_to_deepseek(
-        "POST",
-        _PATH_UPLOAD_FILE,
-        headers=headers,
-        files=files,
-    )
+    return await upload_file(file_content, file.filename, file.content_type)
 
 
 @app.api_route("/v0/chat/fetch_files", methods=["GET"])
-async def fetch_files(request: Request):
+async def fetch_files_route(request: Request):
     """Fetch file status."""
     file_ids = request.query_params.get("file_ids")
-    return await proxy_to_deepseek(
-        "GET",
-        _PATH_FETCH_FILES,
-        params={"file_ids": file_ids},
-    )
+    return await fetch_files(file_ids)
 
 
 @app.api_route("/v0/chat/history_messages", methods=["GET"])
-async def history_messages(request: Request):
+async def history_messages_route(request: Request):
     """Get chat history."""
     chat_session_id = request.query_params.get("chat_session_id")
     offset = request.query_params.get("offset", "0")
     limit = request.query_params.get("limit", "20")
-    return await proxy_to_deepseek(
-        "GET",
-        _PATH_HISTORY_MESSAGES,
-        params={"chat_session_id": chat_session_id, "offset": offset, "limit": limit},
-    )
+    return await get_history_messages(chat_session_id, offset, limit)
 
 
 @app.get("/")
