@@ -1,4 +1,4 @@
-# DeepSeek Web API 文档
+# V0 API 文档
 
 ## 概述
 
@@ -16,6 +16,7 @@
 |------|------|------|
 | `/` | GET | 服务健康检查 |
 | `/completion` | POST | 发送对话，透传 SSE |
+| `/message` | POST | 编辑消息（无状态 API） |
 | `/delete` | POST | 删除 session |
 | `/upload_file` | POST | 上传文件 |
 | `/fetch_files` | GET | 查询文件状态 |
@@ -145,7 +146,72 @@ x-chat-session-id: <chat_session_id>
 
 ---
 
-## 2. POST /delete
+## 2. POST /message
+
+编辑消息，实现**无状态 API**。通过固定 `message_id=1` 实现同一 session 内的多轮对话，模型无上下文记忆。
+
+### 请求体
+
+```json
+{
+  "prompt": "你好",
+  "chat_session_id": "可选，用于多轮对话",
+  "search_enabled": true,
+  "thinking_enabled": true
+}
+```
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `prompt` | string | 是 | 对话内容 |
+| `chat_session_id` | string | 否 | 会话 ID，不提供则自动创建 |
+| `search_enabled` | boolean | 否 | 是否启用搜索，默认 true |
+| `thinking_enabled` | boolean | 否 | 是否启用思考，默认 true |
+
+### 响应
+
+SSE 流，格式同 `/completion`。
+
+### 包装逻辑
+
+1. **无 `chat_session_id`**：调用 `POST /api/v0/chat_session/create` 创建 session
+2. **先调用 `completion`**（如果该 session 还没有消息）：创建第一条消息
+3. **发送 `edit_message`**：payload 中固定 `message_id=1`
+
+### 发送至 DeepSeek 的 payload
+
+```json
+{
+  "chat_session_id": "xxx",
+  "message_id": 1,
+  "prompt": "你好",
+  "search_enabled": true,
+  "thinking_enabled": true
+}
+```
+
+### 无状态特性
+
+- 每次请求固定 `message_id=1`，编辑同一条消息
+- 模型**没有上下文记忆**，每次都是独立对话
+- 客户端只需保存 `chat_session_id`，即可继续多轮对话
+
+### 使用流程
+
+```
+1. POST /message (无 chat_session_id)
+   → 自动创建 session，返回 x-chat-session-id
+
+2. POST /message (带 chat_session_id)
+   → 内部先 completion 创建消息，再 edit_message 编辑 message_id=1
+
+3. 后续每次 POST /message (带相同 chat_session_id)
+   → 都是编辑 message_id=1，模型无上下文
+```
+
+---
+
+## 3. POST /delete
 
 删除指定的 session。
 
@@ -170,7 +236,7 @@ x-chat-session-id: <chat_session_id>
 
 ---
 
-## 3. POST /upload_file
+## 4. POST /upload_file
 
 上传文件到 DeepSeek。
 
@@ -212,7 +278,7 @@ x-chat-session-id: <chat_session_id>
 
 ---
 
-## 4. GET /fetch_files
+## 5. GET /fetch_files
 
 查询文件解析状态。
 
@@ -262,7 +328,7 @@ GET /fetch_files?file_ids=file-xxx,file-yyy
 
 ---
 
-## 5. GET /history_messages
+## 6. GET /history_messages
 
 获取会话的历史消息。
 
@@ -314,7 +380,7 @@ GET /history_messages?chat_session_id=xxx&offset=0&limit=20
 
 ---
 
-## 6. POST /create_session
+## 7. POST /create_session
 
 手动创建新 session。
 
@@ -385,6 +451,7 @@ chat_session_id → last_response_message_id
 | 本服务 | DeepSeek 原始端点 |
 |--------|------------------|
 | `/completion` | `/api/v0/chat/completion` |
+| `/message` | `/api/v0/chat/edit_message` |
 | `/delete` | `/api/v0/chat_session/delete` |
 | `/upload_file` | `/api/v0/file/upload_file` |
 | `/fetch_files` | `/api/v0/file/fetch_files` |

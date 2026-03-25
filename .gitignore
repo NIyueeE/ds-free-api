@@ -2,13 +2,11 @@ uv.lock
 .venv
 .claude
 .serena
+.pytest_cache
+.ruff_cache
 __pycache__
 *.pyc
-.pytest_cache
 *.egg-info
 build
 dist
-
 config.toml
-
-test*

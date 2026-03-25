@@ -4,11 +4,13 @@ import logging
 
 from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
+
+from ..core.logger import logger
 from fastapi.responses import StreamingResponse
 
-from .chat_completions_service import (
+from .v0_service import (
     stream_chat_completion,
-    create_session_on_deepseek,
+    stream_edit_message,
     delete_session as delete_session_service,
     create_session,
     upload_file,
@@ -16,7 +18,7 @@ from .chat_completions_service import (
     get_history_messages,
 )
 
-# API path constants - kept for reference, actual paths defined in chat_completions_service
+# API path constants - kept for reference, actual paths defined in v0_service.py
 
 logger = logging.getLogger("deepseek_web_api")
 
@@ -41,10 +43,12 @@ async def completion(request: Request):
     client_chat_session_id = body.pop("chat_session_id", None)
     ref_file_ids = body.get("ref_file_ids", [])
 
+    logger.info(f"[completion] prompt={prompt[:50]}..., session={client_chat_session_id}")
+
     # Pre-create session if needed to return session_id in header
     response_headers = {}
     if client_chat_session_id is None:
-        chat_session_id = await create_session_on_deepseek()
+        chat_session_id, _ = await create_session()
         client_chat_session_id = chat_session_id
         response_headers["X-Chat-Session-Id"] = chat_session_id
 
@@ -58,10 +62,46 @@ async def completion(request: Request):
         ):
             yield chunk
 
+    logger.info(f"[completion] streaming started, session={client_chat_session_id}")
     return StreamingResponse(
         stream_and_set_header(),
         media_type="text/event-stream",
-        headers=response_headers if response_headers else None,
+        headers=response_headers or None,
+    )
+
+
+@app.api_route("/v0/chat/message", methods=["POST"])
+async def message(request: Request):
+    """Edit message with fixed message_id=1 for stateless multi-turn conversation."""
+    body = await request.json()
+    prompt = body.pop("prompt")
+    search_enabled = body.pop("search_enabled", True)
+    thinking_enabled = body.pop("thinking_enabled", True)
+    client_chat_session_id = body.pop("chat_session_id", None)
+
+    logger.info(f"[message] prompt={prompt[:50]}..., session={client_chat_session_id}")
+
+    # Pre-create session if needed to return session_id in header
+    response_headers = {}
+    if client_chat_session_id is None:
+        chat_session_id, _ = await create_session()
+        client_chat_session_id = chat_session_id
+        response_headers["X-Chat-Session-Id"] = chat_session_id
+
+    async def stream_and_set_header():
+        async for chunk in stream_edit_message(
+            prompt=prompt,
+            chat_session_id=client_chat_session_id,
+            search_enabled=search_enabled,
+            thinking_enabled=thinking_enabled,
+        ):
+            yield chunk
+
+    logger.info(f"[message] streaming started, session={client_chat_session_id}")
+    return StreamingResponse(
+        stream_and_set_header(),
+        media_type="text/event-stream",
+        headers=response_headers or None,
     )
 
 
@@ -70,6 +110,7 @@ async def delete_session(request: Request):
     """Delete session."""
     body = await request.json()
     chat_session_id = body.get("chat_session_id")
+    logger.info(f"[delete] session={chat_session_id}")
 
     return await delete_session_service(chat_session_id)
 
@@ -78,7 +119,11 @@ async def delete_session(request: Request):
 async def create_session_route(request: Request):
     """Create new session."""
     body = await request.json()
-    return await create_session(body)
+    agent = body.get("agent", "chat")
+    logger.info(f"[create_session] agent={agent}")
+
+    _, resp = await create_session({"agent": agent})
+    return resp
 
 
 @app.api_route("/v0/chat/upload_file", methods=["POST"])
@@ -89,6 +134,7 @@ async def upload_file_route(request: Request):
     if not file:
         return Response(content="No file provided", status_code=400)
 
+    logger.info(f"[upload_file] filename={file.filename}")
     file_content = await file.read()
     return await upload_file(file_content, file.filename, file.content_type)
 
@@ -97,6 +143,8 @@ async def upload_file_route(request: Request):
 async def fetch_files_route(request: Request):
     """Fetch file status."""
     file_ids = request.query_params.get("file_ids")
+    logger.info(f"[fetch_files] file_ids={file_ids}")
+
     return await fetch_files(file_ids)
 
 
@@ -104,8 +152,10 @@ async def fetch_files_route(request: Request):
 async def history_messages_route(request: Request):
     """Get chat history."""
     chat_session_id = request.query_params.get("chat_session_id")
-    offset = request.query_params.get("offset", "0")
-    limit = request.query_params.get("limit", "20")
+    offset = int(request.query_params.get("offset", "0"))
+    limit = int(request.query_params.get("limit", "20"))
+    logger.info(f"[history_messages] session={chat_session_id}, offset={offset}, limit={limit}")
+
     return await get_history_messages(chat_session_id, offset, limit)
 
 

@@ -1,0 +1,264 @@
+"""Stream generation service for chat completions.
+
+Converts DeepSeek SSE responses to OpenAI SSE format.
+"""
+
+import json
+import time
+import uuid
+from typing import Optional, List, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .session_pool import StatelessSession
+
+from ....core.logger import logger
+from ...v0_service import stream_chat_completion, stream_edit_message
+from .tools import (
+    TOOL_START_MARKER,
+    TOOL_END_MARKER,
+    TOOL_BUFFER_WINDOW,
+    convert_tool_json_to_openai,
+)
+
+
+async def stream_generator(
+    prompt: str,
+    model_name: str,
+    search_enabled: bool,
+    thinking_enabled: bool,
+    tools: Optional[List[dict]] = None,
+    session: "StatelessSession" = None,
+):
+    """Stream DeepSeek SSE and convert to OpenAI SSE format.
+
+    Args:
+        prompt: The prompt to send
+        model_name: Model name for response
+        search_enabled: Enable web search
+        thinking_enabled: Enable thinking/reasoning
+        tools: Available tools (OpenAI format)
+        session: StatelessSession from the pool. If session.is_initialized is False,
+                 uses completion to initialize message_id=1 first.
+    """
+    # Choose the appropriate stream function based on session state
+    if session and not session.is_initialized:
+        # First request to this session - use completion to create message_id=1
+        stream_func = stream_chat_completion
+        logger.info(f"[stream_generator] session {session.chat_session_id[:8]}... initializing with completion")
+    else:
+        # Session already initialized - use edit_message with message_id=1
+        stream_func = stream_edit_message
+        logger.debug(f"[stream_generator] session {session.chat_session_id[:8]}... using edit_message")
+
+    req_id = f"chatcmpl-{uuid.uuid4().hex}"
+    created_time = int(time.time())
+
+    def make_chunk(content=None, reasoning=None, finish_reason=None, tool_calls=None):
+        delta = {"content": content, "reasoning_content": reasoning}
+        if tool_calls:
+            delta["tool_calls"] = tool_calls
+        choice = {"index": 0, "delta": delta}
+        if finish_reason:
+            choice["finish_reason"] = finish_reason
+
+        chunk_data = {
+            "id": req_id,
+            "object": "chat.completion.chunk",
+            "created": created_time,
+            "model": model_name,
+            "choices": [choice],
+        }
+        chunk_str = f"data: {json.dumps(chunk_data, ensure_ascii=False)}\n\n"
+        logger.debug(f"Yielding chunk: {chunk_str}")
+        return chunk_str
+
+    # State machine: None -> reasoning/content (set by p field)
+    current_mode = None
+    tool_buff = ""
+    in_tool_buffer = False
+    had_tool_call = False
+    force_end = False  # Flag to indicate we should stop yielding to client after tool calls
+    extra_prefix = ""  # Prefetched content from edit_message nested dict format
+
+    async for line in stream_func(
+        prompt=prompt,
+        chat_session_id=session.chat_session_id if session else None,
+        search_enabled=search_enabled,
+        thinking_enabled=thinking_enabled,
+    ):
+        # Handle bytes from proxy_to_deepseek_stream
+        if isinstance(line, bytes):
+            line = line.decode("utf-8")
+
+        # Split by \n\n first to separate SSE events
+        events = line.split("\n\n")
+        for raw_event in events:
+            raw_event = raw_event.strip()
+            if not raw_event:
+                continue
+
+            # Each event may contain \n-separated parts like "event: xxx\ndata: {...}"
+            for part in raw_event.split("\n"):
+                part = part.strip()
+                if not part or part == "{}":
+                    continue
+                if part.startswith("data: "):
+                    part = part[6:]
+                else:
+                    continue  # Skip "event: xxx" lines
+
+                try:
+                    data = json.loads(part)
+                except json.JSONDecodeError:
+                    logger.warning(f"JSON parse failed for part: {repr(part[:200])}")
+                    continue
+
+                v = data.get("v")
+                p = data.get("p")
+                logger.debug(f"RAW event: {repr(part[:100])}, v={repr(str(v)[:50])}, p={repr(p)}")
+
+                # Check for stream end
+                if p and "status" in p and v == "FINISHED":
+                    # If we already sent [DONE] for tool calls, just drain remaining data
+                    if force_end:
+                        logger.debug("Draining remaining stream data after tool calls")
+                        break
+                    # Flush remaining extra_prefix before finishing (unconditional)
+                    if extra_prefix:
+                        yield make_chunk(content=extra_prefix)
+                        extra_prefix = ""
+                    # Flush remaining tool_buff before finishing
+                    if in_tool_buffer and tool_buff:
+                        end_idx = tool_buff.find(TOOL_END_MARKER)
+                        if end_idx != -1:
+                            json_start_idx = tool_buff.find(TOOL_START_MARKER)
+                            if json_start_idx != -1 and end_idx > json_start_idx:
+                                json_str = tool_buff[json_start_idx + len(TOOL_START_MARKER):end_idx]
+                                tool_calls_result = convert_tool_json_to_openai(json_str, tools)
+                                if tool_calls_result:
+                                    for tc in tool_calls_result:
+                                        yield make_chunk(tool_calls=[tc])
+                                        had_tool_call = True
+                        after_end = tool_buff[end_idx + len(TOOL_END_MARKER):]
+                        for char in after_end:
+                            yield make_chunk(content=char)
+                    elif tool_buff:
+                        # Not in buffer mode but have remaining content - flush it
+                        for char in tool_buff:
+                            yield make_chunk(content=char)
+                    break
+
+                # Skip yielding anything to client if we've already force-ended
+                if force_end:
+                    continue
+
+                # Handle edit_message SSE format where v is a nested dict:
+                # {"response":{"fragments":[{"type":"THINK","content":"We"}]}}
+                # or {"response":{"content":"actual content"}}
+                if isinstance(v, dict):
+                    logger.debug(f"[dict v detected] data={repr(data)}, v={repr(v)}")
+                    # Still need to set current_mode based on p even for dict v
+                    if p and "thinking_content" in p:
+                        current_mode = "reasoning"
+                    elif p and "content" in p:
+                        current_mode = "output"
+                    extracted = None
+                    if "response" in v:
+                        resp = v["response"]
+                        if isinstance(resp, dict) and "fragments" in resp:
+                            fragments = resp["fragments"]
+                            if isinstance(fragments, list) and fragments:
+                                first_fragment = fragments[0]
+                                if isinstance(first_fragment, dict) and "content" in first_fragment:
+                                    extracted = str(first_fragment["content"])
+                        elif isinstance(resp, dict) and "content" in resp:
+                            extracted = str(resp["content"])
+                    if extracted:
+                        extra_prefix += extracted
+                        logger.debug(f"Prefetched extra_prefix={repr(extra_prefix)}")
+                    continue
+
+                if not isinstance(v, str) or v == "SEARCHING":
+                    continue
+
+                # Switch mode based on p field (use "in" for flexible matching)
+                if p and "thinking_content" in p:
+                    current_mode = "reasoning"
+                elif p and "content" in p:
+                    current_mode = "output"
+
+                # Ignore if no mode set yet (initial state)
+                if current_mode is None:
+                    logger.debug(f"Ignoring v before mode set: {repr(v)[:50]}")
+                    continue
+
+                # Prepend extra_prefix (from nested dict extraction) and clear it
+                if extra_prefix:
+                    v = extra_prefix + str(v)
+                    extra_prefix = ""
+                    logger.debug(f"Prepended extra_prefix, v now={repr(v[:50])}")
+
+                # Handle content based on current mode
+                if current_mode == "output":
+                    if tools:
+                        tool_buff += str(v)
+
+                        if not in_tool_buffer:
+                            # Check for start marker
+                            start_idx = tool_buff.find(TOOL_START_MARKER)
+                            if start_idx != -1:
+                                # Yield content before start marker
+                                before_start = tool_buff[:start_idx]
+                                for char in before_start:
+                                    yield make_chunk(content=char)
+                                # Keep only from start marker onwards in buffer
+                                tool_buff = tool_buff[start_idx:]
+                                in_tool_buffer = True
+                                logger.debug(f"Entering tool buffer mode, tool_buff={repr(tool_buff)}")
+                            else:
+                                # No start marker yet, yield fallen chars
+                                if len(tool_buff) > TOOL_BUFFER_WINDOW:
+                                    fallen = tool_buff[:-TOOL_BUFFER_WINDOW]
+                                    for char in fallen:
+                                        yield make_chunk(content=char)
+                                tool_buff = tool_buff[-TOOL_BUFFER_WINDOW:]
+                        else:
+                            # In buffer mode, keep all content until end marker found
+                            end_idx = tool_buff.find(TOOL_END_MARKER)
+                            if end_idx != -1:
+                                # Extract JSON
+                                json_start_idx = tool_buff.find(TOOL_START_MARKER)
+                                if json_start_idx != -1 and end_idx > json_start_idx:
+                                    json_str = tool_buff[json_start_idx + len(TOOL_START_MARKER):end_idx]
+                                    tool_calls_result = convert_tool_json_to_openai(json_str, tools)
+                                    if tool_calls_result:
+                                        for tc in tool_calls_result:
+                                            yield make_chunk(tool_calls=[tc])
+                                            had_tool_call = True
+                                        # Successfully parsed tool calls - send finish and [DONE]
+                                        yield make_chunk(finish_reason="tool_calls")
+                                        yield "data: [DONE]\n\n"
+                                        logger.debug("Tool calls parsed, forcing stream end")
+                                        force_end = True
+                                # Even if parsing failed, we still force end at [/TOOL🛠️]
+                                if force_end:
+                                    # Continue consuming remaining data but don't yield to client
+                                    continue
+                            else:
+                                # Keep buffering (no trim in buffer mode to preserve start marker)
+                                pass
+                    else:
+                        yield make_chunk(content=v)
+                else:
+                    # reasoning mode
+                    yield make_chunk(reasoning=v)
+
+    # Send finish reason
+    yield make_chunk(finish_reason="tool_calls" if had_tool_call else "stop")
+    logger.debug("Yielding [DONE]")
+    yield "data: [DONE]\n\n"
+
+    # Mark session as initialized after successful completion (message_id=1 now exists)
+    if session and not session.is_initialized:
+        session.is_initialized = True
+        logger.info(f"[stream_generator] session {session.chat_session_id[:8]}... marked as initialized")

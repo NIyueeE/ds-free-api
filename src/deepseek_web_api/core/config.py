@@ -3,6 +3,7 @@
 import json
 import logging
 import os
+import pathlib
 
 try:
     import tomllib as toml
@@ -59,17 +60,18 @@ DEEPSEEK_HOST = "chat.deepseek.com"
 DEEPSEEK_LOGIN_URL = f"https://{DEEPSEEK_HOST}/api/v0/users/login"
 DEEPSEEK_CREATE_POW_URL = f"https://{DEEPSEEK_HOST}/api/v0/chat/create_pow_challenge"
 
-BASE_HEADERS = {
-    "Host": "chat.deepseek.com",
-    "User-Agent": "DeepSeek/1.0.13 Android/35",
-    "Accept": "application/json",
-    "Accept-Encoding": "gzip",
-    "Content-Type": "application/json",
-    "x-client-platform": "android",
-    "x-client-version": "1.3.0-auto-resume",
-    "x-client-locale": "zh_CN",
-    "accept-charset": "UTF-8",
-}
+# BASE_HEADERS must be configured in config.toml under [headers]
+# See config.toml.example for required fields
+BASE_HEADERS = CONFIG.get("headers", {})
 
-# WASM module file path
-WASM_PATH = os.getenv("WASM_PATH", "sha3_wasm_bg.7b9ca65ddd.wasm")
+# HTTP request impersonation (browser signature for anti-bot)
+# Can be in [browser.impersonate] or root level impersonate
+DEFAULT_IMPERSONATE = CONFIG.get("browser", {}).get("impersonate") or CONFIG.get("impersonate", "")
+
+# WASM module file path (relative to core module, or absolute)
+_default_wasm = pathlib.Path(__file__).parent / "sha3_wasm_bg.7b9ca65ddd.wasm"
+WASM_PATH = os.getenv("WASM_PATH", str(_default_wasm))
+
+# Log level from config (default WARNING if not set)
+_log_level_str = CONFIG.get("log_level", "WARNING").upper()
+LOG_LEVEL = getattr(logging, _log_level_str, logging.WARNING)

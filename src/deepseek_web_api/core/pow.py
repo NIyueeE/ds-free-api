@@ -1,35 +1,45 @@
 """Proof-of-Work (PoW) challenge handling using WASM."""
 
+import base64
 import ctypes
+import json
 import logging
 import struct
 import threading
 
+from curl_cffi import requests
 from wasmtime import Engine, Linker, Module, Store
 
-from .config import WASM_PATH
+from .config import DEEPSEEK_CREATE_POW_URL, DEFAULT_IMPERSONATE, WASM_PATH
 
 logger = logging.getLogger(__name__)
 
-# Cached WASM module - compiled once at first use
-_wasm_cache: dict[str, tuple[Engine, Linker, Module]] = {}
+# Cached WASM module and runtime - compiled once at first use
+_wasm_cache: dict[str, tuple[Engine, Linker, Module, Store]] = {}
 _cache_lock = threading.Lock()
 
 
-def _get_cached_wasm(wasm_path: str) -> tuple[Engine, Linker, Module]:
-    """Get or create cached WASM module."""
+def _get_cached_wasm(wasm_path: str) -> tuple[Engine, Linker, Module, Store]:
+    """Get or create cached WASM module and Store."""
     if wasm_path not in _wasm_cache:
         with _cache_lock:
             if wasm_path not in _wasm_cache:
+                logger.debug(f"[WASM] Loading module from {wasm_path}")
                 try:
                     with open(wasm_path, "rb") as f:
                         wasm_bytes = f.read()
                 except Exception as e:
+                    logger.error(f"[WASM] Failed to load wasm file: {wasm_path}, error: {e}")
                     raise RuntimeError(f"Failed to load wasm file: {wasm_path}, error: {e}")
                 engine = Engine()
                 module = Module(engine, wasm_bytes)
                 linker = Linker(engine)
-                _wasm_cache[wasm_path] = (engine, linker, module)
+                store = Store(engine)
+                instance = linker.instantiate(store, module)
+                # Pre-cache exports for fast access
+                exports = instance.exports(store)
+                _wasm_cache[wasm_path] = (engine, linker, module, store, exports)
+                logger.debug("[WASM] Module loaded and cached successfully")
     return _wasm_cache[wasm_path]
 
 
@@ -39,8 +49,6 @@ def compute_pow_answer(
     salt: str,
     difficulty: int,
     expire_at: int,
-    signature: str,
-    target_path: str,
     wasm_path: str = WASM_PATH,
 ) -> int | None:
     """
@@ -57,11 +65,8 @@ def compute_pow_answer(
 
     prefix = f"{salt}_{expire_at}_"
 
-    # --- Get cached WASM module ---
-    engine, linker, module = _get_cached_wasm(wasm_path)
-    store = Store(engine)
-    instance = linker.instantiate(store, module)
-    exports = instance.exports(store)
+    # --- Get cached WASM module and exports ---
+    _, _, _, store, exports = _get_cached_wasm(wasm_path)
 
     try:
         memory = exports["memory"]
@@ -128,3 +133,65 @@ def compute_pow_answer(
         return None
 
     return int(value)
+
+
+def get_pow_response(target_path: str = "/api/v0/chat/completion") -> str | None:
+    """Get PoW response for the specified endpoint.
+
+    If token is invalid (40003), automatically refreshes token and retries.
+    """
+    from .auth import get_auth_headers, invalidate_token
+
+    max_retries = 2
+
+    for attempt in range(max_retries):
+        logger.debug(f"[PoW] Requesting challenge for {target_path} (attempt {attempt + 1})")
+        headers = get_auth_headers()
+        resp = requests.post(
+            DEEPSEEK_CREATE_POW_URL,
+            headers=headers,
+            json={"target_path": target_path},
+            impersonate=DEFAULT_IMPERSONATE,
+        )
+        data = resp.json()
+        resp.close()
+
+        code = data.get("code")
+
+        # Handle authentication error - invalidate token and retry
+        if code == 40003 and attempt < max_retries - 1:
+            logger.warning(f"[PoW] Token invalid (code={code}), refreshing token and retrying...")
+            invalidate_token()
+            continue
+
+        if code != 0:
+            logger.error(f"[PoW] Failed to get challenge, code={code}")
+            return None
+
+        challenge = data["data"]["biz_data"]["challenge"]
+        logger.debug(f"[PoW] Got challenge, computing answer (difficulty={challenge['difficulty']})")
+
+        answer = compute_pow_answer(
+            challenge["algorithm"],
+            challenge["challenge"],
+            challenge["salt"],
+            challenge["difficulty"],
+            challenge["expire_at"],
+        )
+
+        if answer is None:
+            logger.error("[PoW] Failed to compute answer")
+            return None
+
+        pow_dict = {
+            "algorithm": challenge["algorithm"],
+            "challenge": challenge["challenge"],
+            "salt": challenge["salt"],
+            "answer": answer,
+            "signature": challenge["signature"],
+            "target_path": challenge["target_path"],
+        }
+        logger.debug("[PoW] PoW response generated successfully")
+        return base64.b64encode(json.dumps(pow_dict, separators=(",", ":")).encode()).decode()
+
+    return None

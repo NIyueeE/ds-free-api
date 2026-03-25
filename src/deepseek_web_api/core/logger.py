@@ -24,7 +24,14 @@ class ColoredFormatter(logging.Formatter):
         record.levelname = f"{color}{levelname}{RESET}"
         return super().format(record)
 
-def setup_logger(name: str = "deepseek_web_api", level: int = logging.WARNING):
+def setup_logger(name: str = "deepseek_web_api", level: int = None):
+    if level is None:
+        # Try to get from config, fallback to WARNING
+        try:
+            from .config import LOG_LEVEL
+            level = LOG_LEVEL
+        except ImportError:
+            level = logging.WARNING
     logger = logging.getLogger(name)
     logger.setLevel(level)
     if not logger.handlers:

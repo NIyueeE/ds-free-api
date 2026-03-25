@@ -1,0 +1,216 @@
+"""OpenAI /v1/chat/completions endpoint - thin router."""
+
+import asyncio
+import json
+import time
+import uuid
+from typing import List, Optional
+
+from fastapi import APIRouter, Request, HTTPException
+from fastapi.responses import StreamingResponse, JSONResponse
+from pydantic import BaseModel
+
+from ....core.logger import logger
+from .messages import convert_messages_to_prompt
+from .service import stream_generator
+from .session_pool import get_pool
+
+
+router = APIRouter()
+
+
+class ChatCompletionRequest(BaseModel):
+    """OpenAI-compatible chat completion request."""
+    model: str = "deepseek-web-chat"
+    messages: List[dict]
+    stream: bool = False
+    temperature: Optional[float] = None
+    search_enabled: bool = False
+    thinking_enabled: bool = True
+    tools: Optional[List[dict]] = None
+
+
+@router.post("/v1/chat/completions")
+async def chat_completions(request: Request):
+    """OpenAI-compatible /v1/chat/completions endpoint.
+
+    Uses stateless session pool internally:
+    - Each session tracks if message_id=1 is initialized
+    - First request to a session uses completion, subsequent use edit_message
+    - Client doesn't need to track session_id - we handle it internally
+    """
+    body = await request.body()
+
+    try:
+        data = json.loads(body)
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=400, detail="Invalid JSON")
+
+    validated = ChatCompletionRequest(**data)
+    logger.debug(f"Request payload: {json.dumps(data, ensure_ascii=False, indent=2)}")
+    prompt = convert_messages_to_prompt(validated.messages, validated.tools)
+    logger.debug(f"Constructed prompt:\n{prompt}")
+
+    # Model-specific overrides: reasoning model gets thinking, others don't
+    thinking_enabled = "reasoner" in validated.model
+    search_enabled = False
+
+    pool = await get_pool()
+
+    _MAX_SESSION_RETRIES = 3
+    _RETRY_DELAY = 1.0
+    STREAM_BUFFER_THRESHOLD = 100
+
+    if validated.stream:
+        async def stream_with_pool():
+            """Generator that acquires session from pool, streams, and releases."""
+            for session_retry in range(_MAX_SESSION_RETRIES):
+                session = await pool.acquire()
+                logger.info(f"[stream] acquired session {session.chat_session_id[:8]}..., is_initialized={session.is_initialized}")
+
+                buffered = []
+                started_yielding = False
+                success = False
+                error_session = False  # If True, session will be marked for re-init
+
+                try:
+                    async for chunk in stream_generator(
+                        prompt, validated.model, search_enabled, thinking_enabled,
+                        validated.tools, session
+                    ):
+                        if not started_yielding:
+                            buffered.append(chunk)
+                            # Buffer chunks until threshold reached.
+                            # This avoids sending partial SSL/writes - if an error occurs
+                            # before reaching the threshold, buffered content is discarded
+                            # (it may be incomplete/corrupted). Once threshold is reached,
+                            # we assume the connection is stable and yield chunks directly.
+                            if len(buffered) >= STREAM_BUFFER_THRESHOLD:
+                                for b in buffered:
+                                    yield b
+                                buffered.clear()
+                                started_yielding = True
+                        else:
+                            yield chunk
+                    success = True
+                    logger.info(f"[stream] session {session.chat_session_id[:8]}... completed successfully")
+                    # Stream completed successfully - flush any remaining buffered chunks
+                    if buffered:
+                        for b in buffered:
+                            yield b
+                        buffered.clear()
+                except Exception as e:
+                    error_session = True
+                    logger.warning(f"[stream] session {session.chat_session_id[:8]}... error: {e}")
+                    if session_retry < _MAX_SESSION_RETRIES - 1:
+                        logger.warning(f"[stream] retrying with different session ({session_retry + 1}/{_MAX_SESSION_RETRIES})")
+                        await asyncio.sleep(_RETRY_DELAY * (2 ** session_retry))
+                    else:
+                        logger.error(f"[stream] all session retries exhausted: {e}")
+                        raise
+                finally:
+                    # Release session back to pool (mark as needing re-init if error)
+                    if session:
+                        await pool.release(session, error=error_session)
+
+                # On failure: only flush if we never started yielding.
+                # If we were already streaming, buffered content may be incomplete
+                # and should not be sent to client.
+                if not success and buffered and not started_yielding:
+                    for b in buffered:
+                        yield b
+
+                if success:
+                    break
+
+            # Trigger cleanup of idle sessions
+            asyncio.create_task(pool.cleanup_idle())
+
+        return StreamingResponse(
+            stream_with_pool(),
+            media_type="text/event-stream",
+        )
+
+    # Non-streaming: buffer all chunks first, then return
+    last_exc = None
+
+    for session_retry in range(_MAX_SESSION_RETRIES):
+        session = await pool.acquire()
+        logger.info(f"[non-stream] acquired session {session.chat_session_id[:8]}..., is_initialized={session.is_initialized}")
+
+        chunks = []
+        error_session = False
+
+        try:
+            async for chunk in stream_generator(
+                prompt, validated.model, search_enabled, thinking_enabled,
+                validated.tools, session
+            ):
+                chunks.append(chunk)
+            break  # Success
+        except Exception as e:
+            error_session = True
+            last_exc = e
+            logger.warning(f"[non-stream] session {session.chat_session_id[:8]}... error: {e}")
+            if session_retry < _MAX_SESSION_RETRIES - 1:
+                logger.warning(f"[non-stream] retrying with different session ({session_retry + 1}/{_MAX_SESSION_RETRIES})")
+                await asyncio.sleep(_RETRY_DELAY * (2 ** session_retry))
+            else:
+                logger.error(f"[non-stream] all session retries exhausted: {e}")
+        finally:
+            if session:
+                await pool.release(session, error=error_session)
+
+    # If all retries failed, raise the last exception
+    if not chunks:
+        raise last_exc
+
+    # Parse buffered chunks
+    content_chunks = []
+    reasoning_chunks = []
+    all_tool_calls = []
+    finish_reason = "stop"
+
+    for chunk_str in chunks:
+        if chunk_str == "data: [DONE]\n\n":
+            continue
+        try:
+            chunk_json = json.loads(chunk_str[6:])
+            choice = chunk_json.get("choices", [{}])[0]
+            delta = choice.get("delta", {})
+            if delta.get("content"):
+                content_chunks.append(delta["content"])
+            if delta.get("reasoning_content"):
+                reasoning_chunks.append(delta["reasoning_content"])
+            if delta.get("tool_calls"):
+                all_tool_calls.extend(delta["tool_calls"])
+                finish_reason = "tool_calls"
+            if choice.get("finish_reason"):
+                finish_reason = choice["finish_reason"]
+        except (json.JSONDecodeError, IndexError, KeyError):
+            pass
+
+    full_content = "".join(content_chunks)
+    full_reasoning = "".join(reasoning_chunks)
+
+    message = {
+        "role": "assistant",
+        "content": full_content,
+        "reasoning_content": full_reasoning if full_reasoning else None,
+    }
+    if all_tool_calls:
+        message["tool_calls"] = all_tool_calls
+
+    # Trigger cleanup of idle sessions
+    asyncio.create_task(pool.cleanup_idle())
+
+    return JSONResponse(
+        content={
+            "id": f"chatcmpl-{uuid.uuid4().hex}",
+            "object": "chat.completion",
+            "created": int(time.time()),
+            "model": validated.model,
+            "choices": [{"index": 0, "message": message, "finish_reason": finish_reason}],
+            "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+        }
+    )

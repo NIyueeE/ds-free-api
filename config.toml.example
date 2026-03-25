@@ -1,4 +1,25 @@
+# 日志级别: DEBUG, INFO, WARNING, ERROR
+log_level = "WARNING"
+
 [account]
-email = "your_email@example.com"
+email = "your_email@example.com"  # 邮箱登录（优先）
+mobile = ""                        # 手机号登录（email 为空时使用）
+area_code = "86"                  # 手机号区号，如 "86"
 password = "your_password"
-token = "your_deepseek_token" # 非必须系统会自动管理
+token = ""  # 非必须，系统会自动管理（首次使用后保存）
+
+# 请求头配置
+[headers]
+Host = "chat.deepseek.com"
+User-Agent = "DeepSeek/1.3.0 Android/35"
+Accept = "application/json"
+Accept-Encoding = "gzip"
+Content-Type = "application/json"
+x-client-platform = "android"
+x-client-version = "1.3.0"
+x-client-locale = "zh_CN"
+accept-charset = "UTF-8"
+
+# 浏览器伪装
+[browser]
+impersonate = "safari15_3"  # safari15_3, chrome110, etc.

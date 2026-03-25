@@ -1,18 +1,19 @@
 # DeepSeek Web API
 
+[![](https://img.shields.io/github/license/NIyueeE/deepseek-web-api.svg)](LICENSE)
+![](https://img.shields.io/github/stars/NIyueeE/deepseek-web-api.svg)
+![](https://img.shields.io/github/forks/NIyueeE/deepseek-web-api.svg)
+
 [English](./README.md) | [中文](./README.中文.md)
 
 Inspired by [deepseek2api](https://github.com/iidamie/deepseek2api). Transparent proxy for DeepSeek Chat API with automatic authentication and PoW calculation.
 
 ## Features
 
-- **Automatic Authentication**: Server manages account credentials, no client-side auth required
+- **Automatic Authentication**: Server manages account credentials, no client-side auth required (token obtained on first API call)
 - **PoW (Proof of Work)**: Automatic PoW challenge solving for chat and file upload
-- **Session Management**: Multi-turn conversation support via `chat_session_id`
 - **SSE Streaming**: Pass-through SSE responses from DeepSeek
-- **File Upload**: Upload files and reference them in conversations via `ref_file_ids`
 - **OpenAI Compatible API**: `/v1/chat/completions` endpoint with full tool calling support
-- **Streaming Tool Calls**: Extract and convert tool call markers `[TOOL🛠️]...[/TOOL🛠️]` to OpenAI `delta.tool_calls` format
 
 ## Quick Start
 
@@ -33,12 +34,14 @@ uv run python main.py
 
 ```toml
 [account]
-email = "your_email@example.com"      # DeepSeek account email
-password = "your_password"           # DeepSeek account password
-token = "your_deepseek_token"       # DeepSeek auth token (optional if email/password provided)
+email = "your_email@example.com"   # Email login (priority)
+mobile = ""                        # Phone login (used when email is empty)
+area_code = "86"                   # Phone area code, e.g. "86"
+password = "your_password"
+token = ""                         # Optional, system will auto-manage (saved after first use)
 ```
 
-**Security**: The `/v1/chat/completions` endpoint has no API token verification. **Always run the service on `127.0.0.1`** (default in `main.py`) to prevent unauthorized access.
+**Security**: The `/v1/chat/completions` endpoint has no API token verification by default. **Always run the service on `127.0.0.1`** (default in `main.py`) to prevent unauthorized access. (Or modify to add your own token validation)
 
 ## Models
 
@@ -68,65 +71,18 @@ Available models via `/v1/models`:
 | `/v0/chat/history_messages` | GET | Get chat history |
 | `/v0/chat/upload_file` | POST | Upload file |
 | `/v0/chat/fetch_files` | GET | Query file status |
+| `/v0/chat/message` | POST | Edit message |
 
 ### Endpoint Details
 
 #### POST /v1/chat/completions
-OpenAI-compatible chat completions endpoint with full tool calling support.
+OpenAI-compatible chat completions endpoint with full tool calling support and streaming responses. Fully compatible with OpenAI SDK.
 
 **Features**:
-- Accepts OpenAI-style `messages` array with roles: `system`, `user`, `assistant`, `tool`
-- Supports `tool_calls` in assistant messages for multi-turn tool conversations
-- Tool results passed as `role: "tool"` with `tool_call_id` and `content`
-- Streaming: Extracts `[TOOL🛠️]...[/TOOL🛠️]` markers and converts to `delta.tool_calls` chunks
-- Non-streaming: Extracts tool calls from full response text
-- Model-based behavior: `deepseek-web-reasoner` enables thinking/reasoning content
-
-**Request body**:
-```json
-{
-  "model": "deepseek-web-reasoner",
-  "messages": [
-    {"role": "user", "content": "What's the weather?"}
-  ],
-  "stream": false,
-  "tools": [
-    {
-      "type": "function",
-      "function": {
-        "name": "get_weather",
-        "description": "Get weather for a city",
-        "parameters": {
-          "type": "object",
-          "properties": {"city": {"type": "string"}},
-          "required": ["city"]
-        }
-      }
-    }
-  ]
-}
-```
-
-**Response** (with tool calls):
-```json
-{
-  "id": "chatcmpl-...",
-  "object": "chat.completion",
-  "choices": [{
-    "index": 0,
-    "message": {
-      "role": "assistant",
-      "content": "...",
-      "tool_calls": [{
-        "id": "call_xxx",
-        "type": "function",
-        "function": {"name": "get_weather", "arguments": "{\"city\": \"Beijing\"}"}
-      }]
-    },
-    "finish_reason": "tool_calls"
-  }]
-}
-```
+- Accepts OpenAI-style `messages` array
+- Supports `tool_calls` and multi-turn tool conversations
+- Streaming/non-streaming responses
+- Internally uses `edit_message` API for stateless sessions
 
 ### Endpoint Details
 
@@ -175,17 +131,16 @@ OpenAI-compatible chat completions endpoint with full tool calling support.
 - Adds `Authorization` header, proxies to `GET /api/v0/file/fetch_files`
 - File status: `PENDING` = parsing, `SUCCESS` = done, `FAILED` = error
 
-See [API.md](./API.md) for detailed documentation.
+See [v0_API](./docs/v0_API.md) for detailed documentation.
 
 ## Implementation Notes
 
 ### OpenAI Adapter (`/v1/chat/completions`)
-The OpenAI-compatible adapter works by injecting prompts into the internal `/v0/chat/completion` endpoint:
-- Converts OpenAI `messages` array to a prompt format with role markers (User/Assistant/Tool)
-- Injects tool schemas into system instructions with `[TOOL🛠️]...[/TOOL🛠️]` response format
-- Parses streaming SSE responses to extract tool call markers in real-time
-- Supports multi-turn conversations by passing tool results back as `Tool:` markers
-- **Anti-hallucination truncation**: When tool calls are detected and parsed, the stream is terminated immediately after sending `[DONE]`, preventing the model from hallucinating fake `Tool:` results
+Implements stateless sessions via `edit_message` API:
+- Client sends complete `messages` array, adapter injects conversation history into prompt
+- Uses `message_id=1` with `edit_message` to always edit the latest user message
+- Model always thinks it's the "first conversation", avoiding session state accumulation
+- Supports `deepseek-web-reasoner` model's thinking content
 
 **Anti-Hallucination Mechanism**:
 When the model outputs `[TOOL🛠️]...[/TOOL🛠️]`:
@@ -194,34 +149,43 @@ When the model outputs `[TOOL🛠️]...[/TOOL🛠️]`:
 3. Sends `data: [DONE]\n\n` to signal stream end
 4. Continues consuming the remaining DeepSeek stream (discarding data) to properly close the connection
 
-This prevents the model from generating hallucinated `Tool:` results after the actual tool calls, which was a common issue when the model continued outputting after the tool call block.
-
 ## TODO
 
 - [x] Simple wrapper for deepseek_web_chat API
 - [x] Implement openai_chat_completions protocol adapter
 - [x] Streaming tool call extraction for openai adapter
-- [ ] Fix occasional bug: web session deletion cleanup not completed after conversation ends
 - [ ] Implement claude_message protocol adapter via [litellm](https://github.com/BerriAI/litellm) (convert OpenAI protocol to Claude protocol)
 
 ## Architecture
 
-```
-Client --> DeepSeek Web API --> DeepSeek Backend
-              |
-              +-- OpenAI Compatible Layer (/v1/chat/completions)
-              |      |
-              |      +-- Messages → Prompt conversion
-              |      +-- Tool call extraction & truncation
-              |      +-- SSE → OpenAI format conversion
-              |
-              +-- Internal API Layer (/v0/chat/*)
-              |      |
-              |      +-- Session management
-              |      +-- PoW solving
-              |      +-- Authentication
-              |
-              +-- DeepSeek Backend
+```mermaid
+flowchart LR
+    Client["Client<br/>(OpenAI SDK / curl)"]
+
+    subgraph v1["/v1/chat/completions"]
+        direction TB
+        pool["StatelessSession<br/>Pool"]
+        generator["stream_generator<br/>(SSE Format Conversion)"]
+    end
+
+    subgraph v0["/v0/chat/*"]
+        direction TB
+        store["ParentMsgStore<br/>(chat_session_id →<br/>parent_message_id)"]
+        service["v0_service.py<br/>stream_chat_completion<br/>stream_edit_message"]
+    end
+
+    subgraph core["Core Modules"]
+        auth["auth.py<br/>(Auth)"]
+        pow["pow.py<br/>(PoW)"]
+    end
+
+    Client --> v1
+    Client --> v0
+    pool --> generator
+    store --> service
+    v1 --> core
+    v0 --> core
+    core --> DeepSeek["DeepSeek Backend"]
 ```
 
 ## Disclaimer

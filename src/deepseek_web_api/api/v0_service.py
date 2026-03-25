@@ -3,13 +3,15 @@
 import asyncio
 import json
 import logging
+from collections.abc import AsyncGenerator
+from typing import Any
 
 import httpx
 from fastapi import Response
 
 from ..core.auth import get_auth_headers
-from ..core.pow_service import get_pow_response
-from ..core.session_store import SessionStore
+from ..core.pow import get_pow_response
+from ..core.parent_msg_store import ParentMsgStore
 from ..core.config import DEEPSEEK_HOST
 
 logger = logging.getLogger("deepseek_web_api")
@@ -18,12 +20,12 @@ logger = logging.getLogger("deepseek_web_api")
 _PATH_CREATE_SESSION = "api/v0/chat_session/create"
 _PATH_DELETE_SESSION = "api/v0/chat_session/delete"
 _PATH_COMPLETION = "api/v0/chat/completion"
+_PATH_EDIT_MESSAGE = "api/v0/chat/edit_message"
 _PATH_UPLOAD_FILE = "api/v0/file/upload_file"
 _PATH_FETCH_FILES = "api/v0/file/fetch_files"
 _PATH_HISTORY_MESSAGES = "api/v0/chat/history_messages"
 
 DEEPSEEK_BASE_URL = f"https://{DEEPSEEK_HOST}"
-session_store = SessionStore.get_instance()
 
 
 def parse_sse_response_message_id(content: bytes) -> int | None:
@@ -41,27 +43,18 @@ def parse_sse_response_message_id(content: bytes) -> int | None:
     return None
 
 
-def extract_chat_session_id(resp_body: bytes) -> str | None:
-    """Extract chat_session_id from DeepSeek API response."""
-    try:
-        data = json.loads(resp_body)
-        return data.get("data", {}).get("biz_data", {}).get("id")
-    except Exception as e:
-        logger.warning(f"Failed to extract chat_session_id: {type(e).__name__}")
-        return None
-
-
 async def proxy_to_deepseek(
-    method,
-    path,
-    headers=None,
-    json_data=None,
-    params=None,
-    content=None,
-    files=None,
-):
+    method: str,
+    path: str,
+    headers: dict[str, str] | None = None,
+    json_data: dict[str, Any] | None = None,
+    params: dict[str, Any] | None = None,
+    content: bytes | None = None,
+    files: dict[str, tuple[str, bytes, str]] | None = None,
+) -> Response:
     """Proxy request to DeepSeek backend, return FastAPI Response."""
     url = f"{DEEPSEEK_BASE_URL}/{path}"
+    logger.debug(f"[proxy] {method} {path}")
     auth_headers = get_auth_headers()
     if headers:
         headers = {**headers, **auth_headers}
@@ -90,14 +83,15 @@ async def proxy_to_deepseek(
 
 
 async def proxy_to_deepseek_stream(
-    method,
-    path,
-    headers=None,
-    json_data=None,
-    params=None,
-):
+    method: str,
+    path: str,
+    headers: dict[str, str] | None = None,
+    json_data: dict[str, Any] | None = None,
+    params: dict[str, Any] | None = None,
+) -> AsyncGenerator[bytes, None]:
     """Proxy request to DeepSeek backend as a streaming response, yield bytes."""
     url = f"{DEEPSEEK_BASE_URL}/{path}"
+    logger.debug(f"[proxy:stream] {method} {path}")
     auth_headers = get_auth_headers()
     if headers:
         headers = {**headers, **auth_headers}
@@ -117,25 +111,6 @@ async def proxy_to_deepseek_stream(
                 yield chunk
 
 
-async def create_session_on_deepseek() -> str | None:
-    """Create session on DeepSeek backend and return the chat_session_id."""
-    resp = await proxy_to_deepseek(
-        "POST",
-        _PATH_CREATE_SESSION,
-        json_data={"agent": "chat"},
-    )
-    # resp is FastAPI Response, access body via .body
-    if resp.body:
-        try:
-            csid = extract_chat_session_id(resp.body)
-            if csid:
-                await session_store.acreate_session(csid)
-                return csid
-        except Exception as e:
-            logger.warning(f"Failed to create session: {e}")
-    return None
-
-
 async def delete_session(chat_session_id: str) -> None:
     """Delete session from DeepSeek backend and clean up local store."""
     max_retries = 5
@@ -149,7 +124,7 @@ async def delete_session(chat_session_id: str) -> None:
                 _PATH_DELETE_SESSION,
                 json_data={"chat_session_id": chat_session_id},
             )
-            logger.warning(f"[delete_session] attempt {attempt+1}: status={resp.status_code}")
+            logger.info(f"[delete_session] attempt {attempt+1}: status={resp.status_code}")
 
             # Check biz_code from delete response
             if resp.body:
@@ -158,7 +133,7 @@ async def delete_session(chat_session_id: str) -> None:
                     biz_code = data.get("data", {}).get("biz_code")
                     if biz_code == 0:
                         # Delete succeeded
-                        logger.warning("[delete_session] session deleted")
+                        logger.info(f"[delete_session] session={chat_session_id} deleted")
                         break
                     else:
                         biz_msg = data.get("data", {}).get("biz_msg", "unknown error")
@@ -173,7 +148,7 @@ async def delete_session(chat_session_id: str) -> None:
             continue
         except Exception as e:
             last_exc = e
-            logger.warning(f"[delete_session] attempt {attempt+1} exception: {type(e).__name__}: {e}")
+            logger.warning(f"[delete_session] attempt {attempt+1} failed: {type(e).__name__}: {e}")
             if attempt < max_retries - 1:
                 await asyncio.sleep(retry_delay)
                 retry_delay *= 2
@@ -183,17 +158,17 @@ async def delete_session(chat_session_id: str) -> None:
         logger.warning(f"[delete_session] all {max_retries} attempts failed, last error: {last_exc}")
 
     # Always clean up local store, regardless of backend result
-    await session_store.adelete_session(chat_session_id)
+    await ParentMsgStore.get_instance().adelete(chat_session_id)
 
 
-async def create_session(body: dict = None) -> Response:
-    """Create new session and return response with chat_session_id added.
+async def create_session(body: dict = None) -> tuple[str | None, Response]:
+    """Create new session and return (session_id, response).
 
     Args:
         body: Request body, defaults to {"agent": "chat"}
 
     Returns:
-        FastAPI Response with chat_session_id added to body
+        Tuple of (session_id, FastAPI Response with chat_session_id added to body)
     """
     if body is None:
         body = {"agent": "chat"}
@@ -204,14 +179,16 @@ async def create_session(body: dict = None) -> Response:
         json_data=body,
     )
 
+    chat_session_id = None
     if resp.body:
         try:
-            chat_session_id = extract_chat_session_id(resp.body)
+            data = json.loads(resp.body)
+            chat_session_id = data.get("data", {}).get("biz_data", {}).get("id")
             if chat_session_id:
-                await session_store.acreate_session(chat_session_id)
-                data = json.loads(resp.body)
+                await ParentMsgStore.get_instance().acreate(chat_session_id)
                 data["chat_session_id"] = chat_session_id
-                return Response(
+                logger.info(f"[create_session] session={chat_session_id} created")
+                resp = Response(
                     content=json.dumps(data),
                     status_code=resp.status_code,
                     headers={"Content-Type": "application/json"},
@@ -219,11 +196,7 @@ async def create_session(body: dict = None) -> Response:
         except Exception as e:
             logger.warning(f"Failed to process session response: {e}")
 
-    return Response(
-        content=resp.body,
-        status_code=resp.status_code,
-        headers={"Content-Type": "application/json"},
-    )
+    return chat_session_id, resp
 
 
 async def upload_file(file_content: bytes, filename: str, content_type: str) -> Response:
@@ -236,13 +209,20 @@ async def upload_file(file_content: bytes, filename: str, content_type: str) -> 
 
     Returns:
         FastAPI Response from DeepSeek
+
+    Raises:
+        RuntimeError: If PoW response cannot be obtained
     """
     files = {"file": (filename, file_content, content_type)}
     pow_response = get_pow_response(target_path="/api/v0/file/upload_file")
+    if not pow_response:
+        logger.error("[upload_file] Failed to get PoW response")
+        raise RuntimeError("Failed to get PoW response for file upload")
+
     headers = {
         "x-ds-pow-response": pow_response,
         "x-file-size": str(len(file_content)),
-    } if pow_response else {}
+    }
 
     return await proxy_to_deepseek(
         "POST",
@@ -310,19 +290,32 @@ async def stream_chat_completion(
     Yields:
         bytes: Raw SSE response chunks from DeepSeek
     """
+    logger.info(f"[stream_chat] session={chat_session_id}, prompt={prompt[:30]}...")
+
     # Determine chat_session_id and parent_message_id
+    store = ParentMsgStore.get_instance()
     if chat_session_id:
-        parent_message_id = await session_store.aget_parent_message_id(chat_session_id)
-        if not await session_store.ahas_session(chat_session_id):
-            await session_store.acreate_session(chat_session_id)
+        parent_message_id = await store.aget_parent_message_id(chat_session_id)
+        if not await store.ahas(chat_session_id):
+            await store.acreate(chat_session_id)
             parent_message_id = None
     else:
         # Pre-create session so we can return the session_id in header
-        chat_session_id = await create_session_on_deepseek()
+        chat_session_id, _ = await create_session()
+        if not chat_session_id:
+            logger.error("[stream_chat_completion] Failed to create session")
+            yield b"data: {\"error\": \"Failed to create session\"}\n\n"
+            yield b"event: finish\ndata: {}\n\n"
+            return
         parent_message_id = None
 
     # Get PoW
     pow_response = get_pow_response()
+    if not pow_response:
+        logger.error("[stream_chat_completion] Failed to get PoW response")
+        yield b"data: {\"error\": \"Failed to get PoW response\"}\n\n"
+        yield b"event: finish\ndata: {}\n\n"
+        return
 
     # Build payload for DeepSeek
     payload = {
@@ -335,21 +328,91 @@ async def stream_chat_completion(
         "thinking_enabled": thinking_enabled,
     }
 
-    headers = {"x-ds-pow-response": pow_response} if pow_response else {}
+    headers = {"x-ds-pow-response": pow_response}
 
-    # Stream and collect
-    collected = b""
+    # Stream and collect only if we need to extract message_id
+    collected = b"" if chat_session_id else None
     async for chunk in proxy_to_deepseek_stream(
         "POST",
         _PATH_COMPLETION,
         headers=headers,
         json_data=payload,
     ):
-        collected += chunk
+        if collected is not None:
+            collected += chunk
         yield chunk
 
     # Update session with message_id after stream completes
-    if chat_session_id:
+    if collected is not None:
         msg_id = parse_sse_response_message_id(collected)
         if msg_id:
-            await session_store.aupdate_parent_message_id(chat_session_id, msg_id)
+            await ParentMsgStore.get_instance().aupdate_parent_message_id(chat_session_id, msg_id)
+            logger.info(f"[stream_chat] session={chat_session_id} updated parent_msg_id={msg_id}")
+
+
+async def stream_edit_message(
+    prompt: str,
+    chat_session_id: str | None = None,
+    search_enabled: bool = True,
+    thinking_enabled: bool = True,
+):
+    """Stream edit message from DeepSeek and yield SSE bytes.
+
+    Uses fixed message_id=1 to enable stateless multi-turn conversations
+    within a single chat_session_id.
+
+    Args:
+        prompt: The prompt to send
+        chat_session_id: Optional session ID, uses default if not provided
+        search_enabled: Enable web search
+        thinking_enabled: Enable thinking/reasoning
+
+    Yields:
+        bytes: Raw SSE response chunks from DeepSeek
+    """
+    logger.info(f"[edit_message] session={chat_session_id}, prompt={prompt[:30]}...")
+
+    # Use provided session_id or create default one
+    if not chat_session_id:
+        chat_session_id, _ = await create_session()
+        if not chat_session_id:
+            logger.error("[edit_message] Failed to create session")
+            yield b"data: {\"error\": \"Failed to create session\"}\n\n"
+            yield b"event: finish\ndata: {}\n\n"
+            return
+
+    # Get PoW
+    pow_response = get_pow_response()
+    if not pow_response:
+        logger.error("[edit_message] Failed to get PoW response")
+        yield b"data: {\"error\": \"Failed to get PoW response\"}\n\n"
+        yield b"event: finish\ndata: {}\n\n"
+        return
+
+    # Build payload with fixed message_id=1
+    payload = {
+        "chat_session_id": chat_session_id,
+        "message_id": 1,  # Fixed message_id for stateless conversation
+        "prompt": prompt,
+        "search_enabled": search_enabled,
+        "thinking_enabled": thinking_enabled,
+    }
+
+    headers = {"x-ds-pow-response": pow_response}
+
+    # Stream from DeepSeek
+    collected = b""
+    async for chunk in proxy_to_deepseek_stream(
+        "POST",
+        _PATH_EDIT_MESSAGE,
+        headers=headers,
+        json_data=payload,
+    ):
+        collected += chunk
+        yield chunk
+
+    # Update parent_message_id for future calls
+    msg_id = parse_sse_response_message_id(collected)
+    if msg_id:
+        await ParentMsgStore.get_instance().aupdate_parent_message_id(chat_session_id, msg_id)
+        logger.info(f"[edit_message] session={chat_session_id} updated parent_msg_id={msg_id}")
