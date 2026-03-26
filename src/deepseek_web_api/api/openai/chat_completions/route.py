@@ -13,7 +13,8 @@ from pydantic import BaseModel
 from ....core.logger import logger
 from .messages import convert_messages_to_prompt
 from .service import stream_generator
-from .session_pool import get_pool
+from .session_pool import get_pool, SessionPoolFullError
+from ....api.v0_service import RateLimitError
 
 
 router = APIRouter()
@@ -91,6 +92,13 @@ async def chat_completions(request: Request):
             for session_retry in range(_MAX_SESSION_RETRIES):
                 try:
                     session = await pool.acquire()
+                except SessionPoolFullError as e:
+                    logger.warning(f"[stream] pool exhausted: {e}")
+                    async for chunk in _emit_stream_error(
+                        "Service temporarily unavailable: all DeepSeek sessions are busy, please retry later"
+                    ):
+                        yield chunk
+                    return
                 except Exception as e:
                     logger.error(f"[stream] failed to acquire session: {e}")
                     async for chunk in _emit_stream_error(
@@ -131,6 +139,17 @@ async def chat_completions(request: Request):
                         for b in buffered:
                             yield b
                         buffered.clear()
+                except RateLimitError as e:
+                    # Rate limit is account/IP-wide — retrying with a different session won't help.
+                    # The inner retry loop (in stream_chat_completion/stream_edit_message) already
+                    # exhausted its attempts; surface the error without touching session state.
+                    logger.warning(f"[stream] DeepSeek rate limit exhausted all retries: {e}")
+                    if not started_yielding:
+                        async for chunk in _emit_stream_error(
+                            "DeepSeek rate limit exceeded, please retry later"
+                        ):
+                            yield chunk
+                    return  # No session retry — a different session won't help
                 except Exception as e:
                     error_session = True
                     logger.warning(f"[stream] session {session.chat_session_id[:8]}... error: {e}")
@@ -170,6 +189,12 @@ async def chat_completions(request: Request):
     for session_retry in range(_MAX_SESSION_RETRIES):
         try:
             session = await pool.acquire()
+        except SessionPoolFullError as e:
+            logger.warning(f"[non-stream] pool exhausted: {e}")
+            raise HTTPException(
+                status_code=503,
+                detail="Service temporarily unavailable: all DeepSeek sessions are busy, please retry later",
+            )
         except Exception as e:
             last_exc = e
             logger.error(f"[non-stream] failed to acquire session: {e}")
@@ -186,6 +211,10 @@ async def chat_completions(request: Request):
             ):
                 chunks.append(chunk)
             break  # Success
+        except RateLimitError as e:
+            last_exc = e
+            logger.warning(f"[non-stream] DeepSeek rate limit exhausted all retries: {e}")
+            # Don't retry with a different session — rate limit is account/IP-wide
         except Exception as e:
             error_session = True
             last_exc = e
@@ -201,6 +230,11 @@ async def chat_completions(request: Request):
 
     # If all retries failed, raise the last exception
     if not chunks:
+        if isinstance(last_exc, (RateLimitError, SessionPoolFullError)):
+            raise HTTPException(
+                status_code=503,
+                detail="Service temporarily unavailable: DeepSeek rate limit exceeded, please retry later",
+            )
         if last_exc is not None:
             raise last_exc
         raise HTTPException(status_code=502, detail="DeepSeek returned no completion chunks")

@@ -467,3 +467,193 @@ class TestParseSseResponseMessageId:
         result = v0_service.parse_sse_response_message_id(b"invalid")
 
         assert result is None
+
+
+class TestParseRetryAfter:
+    """Test _parse_retry_after helper."""
+
+    def test_returns_float_seconds(self):
+        assert v0_service._parse_retry_after("10") == 10.0
+        assert v0_service._parse_retry_after("30.5") == 30.5
+
+    def test_returns_zero_for_none(self):
+        assert v0_service._parse_retry_after(None) == 0.0
+
+    def test_returns_zero_for_empty(self):
+        assert v0_service._parse_retry_after("") == 0.0
+
+    def test_returns_zero_for_unparseable(self):
+        assert v0_service._parse_retry_after("not-a-number") == 0.0
+
+    def test_clamps_negative_to_zero(self):
+        assert v0_service._parse_retry_after("-5") == 0.0
+
+
+class TestProxyToDeepseekStreamRateLimit:
+    """Test rate limit detection in proxy_to_deepseek_stream."""
+
+    @pytest.mark.asyncio
+    @patch("deepseek_web_api.api.v0_service.get_auth_headers")
+    @patch("deepseek_web_api.api.v0_service.httpx.AsyncClient")
+    async def test_raises_rate_limit_error_on_429(self, mock_client_class, mock_get_auth):
+        mock_get_auth.return_value = {"authorization": "Bearer test"}
+
+        mock_resp = AsyncMock()
+        mock_resp.status_code = 429
+        mock_resp.headers = {"Retry-After": "15"}
+        mock_resp.aread = AsyncMock(return_value=b'rate limited')
+        mock_resp.__aenter__ = AsyncMock(return_value=mock_resp)
+        mock_resp.__aexit__ = AsyncMock(return_value=None)
+
+        mock_client = MagicMock()
+        mock_client.stream.return_value = mock_resp
+        mock_client_cm = AsyncMock()
+        mock_client_cm.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client_cm.__aexit__ = AsyncMock(return_value=None)
+        mock_client_class.return_value = mock_client_cm
+
+        with pytest.raises(v0_service.RateLimitError) as exc_info:
+            async for _ in v0_service.proxy_to_deepseek_stream("POST", "api/v0/test"):
+                pass
+
+        assert exc_info.value.retry_after == 15.0
+        assert "429" in str(exc_info.value)
+
+    @pytest.mark.asyncio
+    @patch("deepseek_web_api.api.v0_service.get_auth_headers")
+    @patch("deepseek_web_api.api.v0_service.httpx.AsyncClient")
+    async def test_raises_rate_limit_error_on_5xx(self, mock_client_class, mock_get_auth):
+        mock_get_auth.return_value = {"authorization": "Bearer test"}
+
+        mock_resp = AsyncMock()
+        mock_resp.status_code = 503
+        mock_resp.headers = {}
+        mock_resp.aread = AsyncMock(return_value=b'service unavailable')
+        mock_resp.__aenter__ = AsyncMock(return_value=mock_resp)
+        mock_resp.__aexit__ = AsyncMock(return_value=None)
+
+        mock_client = MagicMock()
+        mock_client.stream.return_value = mock_resp
+        mock_client_cm = AsyncMock()
+        mock_client_cm.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client_cm.__aexit__ = AsyncMock(return_value=None)
+        mock_client_class.return_value = mock_client_cm
+
+        with pytest.raises(v0_service.RateLimitError) as exc_info:
+            async for _ in v0_service.proxy_to_deepseek_stream("POST", "api/v0/test"):
+                pass
+
+        assert exc_info.value.retry_after == 5.0
+        assert "503" in str(exc_info.value)
+
+
+class TestStreamRateLimitRetry:
+    """Test rate limit retry logic in stream_chat_completion and stream_edit_message."""
+
+    @pytest.mark.asyncio
+    @patch("deepseek_web_api.api.v0_service.asyncio.sleep", new_callable=AsyncMock)
+    @patch("deepseek_web_api.api.v0_service.get_pow_response")
+    @patch("deepseek_web_api.api.v0_service.proxy_to_deepseek_stream")
+    @patch("deepseek_web_api.api.v0_service.create_session")
+    async def test_stream_chat_retries_on_rate_limit(
+        self, mock_create, mock_stream, mock_pow, mock_sleep, reset_parent_msg_store
+    ):
+        """stream_chat_completion retries after rate limit and succeeds."""
+        mock_create.return_value = ("session-rl", MagicMock())
+        mock_pow.return_value = "pow-token"
+
+        async def rate_limited():
+            raise v0_service.RateLimitError("HTTP 429", retry_after=0.0)
+            yield  # make it an async generator
+
+        async def success():
+            yield b'data: {"response_message_id": 5}\n\n'
+
+        mock_stream.side_effect = [rate_limited(), success()]
+
+        chunks = []
+        async for chunk in v0_service.stream_chat_completion("Hello"):
+            chunks.append(chunk)
+
+        assert mock_stream.call_count == 2
+        mock_sleep.assert_called_once()  # Waited before retry
+        assert len(chunks) > 0
+
+    @pytest.mark.asyncio
+    @patch("deepseek_web_api.api.v0_service.asyncio.sleep", new_callable=AsyncMock)
+    @patch("deepseek_web_api.api.v0_service.get_pow_response")
+    @patch("deepseek_web_api.api.v0_service.proxy_to_deepseek_stream")
+    @patch("deepseek_web_api.api.v0_service.create_session")
+    async def test_stream_chat_raises_after_all_retries(
+        self, mock_create, mock_stream, mock_pow, mock_sleep, reset_parent_msg_store
+    ):
+        """stream_chat_completion raises RateLimitError after all retries exhausted."""
+        mock_create.return_value = ("session-rl2", MagicMock())
+        mock_pow.return_value = "pow-token"
+
+        async def rate_limited():
+            raise v0_service.RateLimitError("HTTP 429", retry_after=0.0)
+            yield
+
+        mock_stream.side_effect = [rate_limited(), rate_limited(), rate_limited()]
+
+        with pytest.raises(v0_service.RateLimitError):
+            async for _ in v0_service.stream_chat_completion("Hello"):
+                pass
+
+        assert mock_stream.call_count == v0_service._MAX_RATE_LIMIT_RETRIES
+
+    @pytest.mark.asyncio
+    @patch("deepseek_web_api.api.v0_service.asyncio.sleep", new_callable=AsyncMock)
+    @patch("deepseek_web_api.api.v0_service.get_pow_response")
+    @patch("deepseek_web_api.api.v0_service.proxy_to_deepseek_stream")
+    async def test_stream_edit_retries_on_rate_limit(
+        self, mock_stream, mock_pow, mock_sleep, reset_parent_msg_store
+    ):
+        """stream_edit_message retries after rate limit and succeeds."""
+        mock_pow.return_value = "pow-token"
+
+        async def rate_limited():
+            raise v0_service.RateLimitError("HTTP 429", retry_after=0.0)
+            yield
+
+        async def success():
+            yield b'data: {"response_message_id": 7}\n\n'
+
+        mock_stream.side_effect = [rate_limited(), success()]
+
+        chunks = []
+        async for chunk in v0_service.stream_edit_message("Hello", chat_session_id="sess-edit"):
+            chunks.append(chunk)
+
+        assert mock_stream.call_count == 2
+        mock_sleep.assert_called_once()
+        assert len(chunks) > 0
+
+    @pytest.mark.asyncio
+    @patch("deepseek_web_api.api.v0_service.asyncio.sleep", new_callable=AsyncMock)
+    @patch("deepseek_web_api.api.v0_service.get_pow_response")
+    @patch("deepseek_web_api.api.v0_service.proxy_to_deepseek_stream")
+    @patch("deepseek_web_api.api.v0_service.create_session")
+    async def test_retry_delay_respects_retry_after_header(
+        self, mock_create, mock_stream, mock_pow, mock_sleep, reset_parent_msg_store
+    ):
+        """Retry delay uses the larger of base delay and Retry-After."""
+        mock_create.return_value = ("session-rl3", MagicMock())
+        mock_pow.return_value = "pow-token"
+
+        async def rate_limited_with_header():
+            raise v0_service.RateLimitError("HTTP 429", retry_after=60.0)
+            yield
+
+        async def success():
+            yield b'data: {}\n\n'
+
+        mock_stream.side_effect = [rate_limited_with_header(), success()]
+
+        async for _ in v0_service.stream_chat_completion("Hello"):
+            pass
+
+        # Delay should be at least the Retry-After value (60s), not just base delay (5s)
+        sleep_call_arg = mock_sleep.call_args[0][0]
+        assert sleep_call_arg >= 60.0

@@ -41,6 +41,8 @@ cors_origins = ["*"]                 # 建议改成明确白名单
 cors_allow_credentials = false
 cors_allow_methods = ["*"]
 cors_allow_headers = ["*"]
+pool_size = 10                       # 最大并发 DeepSeek session 数（环境变量: DEEPSEEK_WEB_POOL_SIZE）
+pool_acquire_timeout = 30.0          # 等待可用 session 的超时秒数，超时返回 503（环境变量: DEEPSEEK_WEB_POOL_ACQUIRE_TIMEOUT）
 
 [auth]
 tokens = []                          # 配置一个或多个 token 启用鉴权
@@ -189,6 +191,19 @@ response = client.chat.completions.create(
 - 模型始终认为这是"第一次对话"，避免会话状态累积
 - 支持 `deepseek-web-reasoner` 模型的思考内容
 
+**Session Pool**：
+- 维护有上限的 DeepSeek session 池（`pool_size`，默认 10）
+- 当所有 session 繁忙时，新请求最多等待 `pool_acquire_timeout` 秒（默认 30s），超时返回 HTTP 503
+- 空闲 session 每 `max_idle_seconds/2`（默认 150s）自动清理
+- 硬上限防止并发请求时无限制地创建 session 触发限流
+
+**限流处理**：
+- `proxy_to_deepseek_stream` 在 yield 任何字节前检测 HTTP 429 和 5xx 响应
+- 遇到限流时最多重试 3 次，指数退避（5s、10s、20s），并遵守 `Retry-After` header
+- 每次重试独立获取新 PoW（旧 PoW 会过期）
+- 全部重试失败后：流式返回 SSE 错误 chunk；非流式返回 HTTP 503
+- 限流错误不会触发 session pool 重试（账号级限流，换 session 无效）
+
 **防幻觉机制**：
 当模型输出 `[TOOL🛠️]...[/TOOL🛠️]` 时：
 1. 适配器提取并解析工具调用 JSON
@@ -201,6 +216,8 @@ response = client.chat.completions.create(
 - [x] 简单包装 deepseek_web_chat API
 - [x] 实现 openai_chat_completions 协议适配器
 - [x] openai适配器的流式工具调用提取
+- [x] Session pool 硬上限，防止并发 session 创建触发限流
+- [x] 流式路径限流检测（HTTP 429/5xx）与指数退避重试
 - [ ] 通过 [litellm](https://github.com/BerriAI/litellm) 实现 claude_message 协议适配器（转换OpenAI协议到Claude协议）
 - [ ] 实现多用户账户负载均衡，防止 DeepSeek 请求频率限制
 

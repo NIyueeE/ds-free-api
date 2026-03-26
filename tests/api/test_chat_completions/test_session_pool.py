@@ -11,6 +11,7 @@ from deepseek_web_api.api.openai.chat_completions.session_pool import (
     StatelessSession,
     StatelessSessionPool,
     SessionPoolError,
+    SessionPoolFullError,
     get_pool,
 )
 
@@ -38,7 +39,7 @@ class TestStatelessSessionPool:
 
     @pytest.fixture
     def pool(self):
-        return StatelessSessionPool(max_idle_seconds=60, pool_size=5)
+        return StatelessSessionPool(max_idle_seconds=60, pool_size=5, acquire_timeout=2.0)
 
     @pytest.mark.asyncio
     async def test_acquire_returns_session(self, pool):
@@ -245,6 +246,73 @@ class TestStatelessSessionPool:
         assert "old-session" not in pool._sessions
         mock_delete_session.assert_awaited_once_with("old-session")
 
+    @pytest.mark.asyncio
+    async def test_acquire_raises_when_pool_full_and_timeout(self, pool):
+        """Pool at capacity with all sessions locked — acquire should time out."""
+        pool._acquire_timeout = 0.1  # Short timeout for test speed
+
+        # Fill pool to capacity
+        for i in range(pool._pool_size):
+            s = StatelessSession(chat_session_id=f"busy-{i}")
+            await s.lock.acquire()
+            pool._sessions[f"busy-{i}"] = s
+
+        with pytest.raises(SessionPoolFullError):
+            await pool.acquire()
+
+    @pytest.mark.asyncio
+    async def test_acquire_unblocks_when_session_released(self, pool):
+        """Waiter in acquire() should receive the session once release() is called."""
+        pool._acquire_timeout = 5.0
+
+        # Fill pool to capacity with locked sessions
+        sessions = []
+        for i in range(pool._pool_size):
+            s = StatelessSession(chat_session_id=f"busy-{i}")
+            await s.lock.acquire()
+            pool._sessions[f"busy-{i}"] = s
+            sessions.append(s)
+
+        # Start acquire in background — will block until a session is released
+        acquire_task = asyncio.create_task(pool.acquire())
+        await asyncio.sleep(0.05)  # Let acquire() reach the wait state
+
+        # Release one session
+        await pool.release(sessions[0])
+
+        acquired = await asyncio.wait_for(acquire_task, timeout=2.0)
+        assert acquired.chat_session_id == "busy-0"
+        assert acquired.lock.locked()
+
+    @pytest.mark.asyncio
+    async def test_acquire_respects_pending_creates_as_reserved_slots(self, pool):
+        """_pending_creates should count toward effective pool size to prevent over-creation."""
+        # Pool size 5, 0 sessions, 4 pending creates
+        pool._pending_creates = 4
+
+        created_count = 0
+
+        async def slow_create():
+            nonlocal created_count
+            await asyncio.sleep(0.05)
+            created_count += 1
+            return StatelessSession(chat_session_id=f"created-{created_count}")
+
+        with patch.object(pool, '_create_session', new=slow_create):
+            # Only 1 slot left — only one concurrent create should proceed immediately
+            task1 = asyncio.create_task(pool.acquire())
+            await asyncio.sleep(0.01)
+            # Effective size is now 5 (0 + 4 + 1 pending), pool is full
+            # Manually verify _pending_creates got incremented for task1
+            assert pool._pending_creates == 5
+
+            # Cancel task1 to avoid hanging test (it's blocked on slow_create)
+            task1.cancel()
+            try:
+                await task1
+            except (asyncio.CancelledError, Exception):
+                pass
+
 
 class TestGetPool:
     """Tests for get_pool function."""
@@ -272,6 +340,7 @@ class TestGetPool:
         assert isinstance(pool, StatelessSessionPool)
         assert pool._max_idle_seconds == 300
         assert pool._pool_size == 10
+        assert pool._acquire_timeout == 30.0
 
         # Cleanup
         await pool.stop_cleanup()

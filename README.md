@@ -41,6 +41,8 @@ cors_origins = ["*"]                 # Recommended: replace with explicit origin
 cors_allow_credentials = false
 cors_allow_methods = ["*"]
 cors_allow_headers = ["*"]
+pool_size = 10                       # Max concurrent DeepSeek sessions (env: DEEPSEEK_WEB_POOL_SIZE)
+pool_acquire_timeout = 30.0          # Seconds to wait for a free session before returning 503 (env: DEEPSEEK_WEB_POOL_ACQUIRE_TIMEOUT)
 
 [auth]
 tokens = []                          # Configure one or more tokens to enable auth
@@ -192,6 +194,19 @@ Implements stateless sessions via `edit_message` API:
 - Model always thinks it's the "first conversation", avoiding session state accumulation
 - Supports `deepseek-web-reasoner` model's thinking content
 
+**Session Pool**:
+- Maintains a bounded pool of DeepSeek sessions (`pool_size`, default 10)
+- When all sessions are busy, new requests wait up to `pool_acquire_timeout` seconds (default 30s) before returning HTTP 503
+- Idle sessions are cleaned up automatically every `max_idle_seconds/2` (default 150s)
+- Hard cap prevents flooding DeepSeek with unbounded concurrent session creations
+
+**Rate Limit Handling**:
+- `proxy_to_deepseek_stream` detects HTTP 429 and 5xx responses before yielding any bytes
+- On rate limit, retries up to 3 times with exponential backoff (5s, 10s, 20s), respecting `Retry-After` header
+- Each retry fetches a fresh PoW challenge (challenges expire)
+- If all retries fail: streaming returns an SSE error chunk; non-streaming returns HTTP 503
+- Rate limit errors do NOT trigger session pool retry (account-wide limit, switching sessions won't help)
+
 **Anti-Hallucination Mechanism**:
 When the model outputs `[TOOL🛠️]...[/TOOL🛠️]`:
 1. The adapter extracts and parses the tool call JSON
@@ -204,6 +219,8 @@ When the model outputs `[TOOL🛠️]...[/TOOL🛠️]`:
 - [x] Simple wrapper for deepseek_web_chat API
 - [x] Implement openai_chat_completions protocol adapter
 - [x] Streaming tool call extraction for openai adapter
+- [x] Session pool hard cap to prevent flooding DeepSeek with concurrent session creations
+- [x] Rate limit detection (HTTP 429/5xx) with exponential backoff retry in streaming path
 - [ ] Implement claude_message protocol adapter via [litellm](https://github.com/BerriAI/litellm) (convert OpenAI protocol to Claude protocol)
 - [ ] Implement multi-user account load balancing to prevent DeepSeek rate limiting with concurrent requests
 
