@@ -27,6 +27,27 @@ _PATH_HISTORY_MESSAGES = "api/v0/chat/history_messages"
 
 DEEPSEEK_BASE_URL = f"https://{DEEPSEEK_HOST}"
 
+_MAX_RATE_LIMIT_RETRIES = 3
+_RATE_LIMIT_BASE_DELAY = 5.0  # seconds; doubles each retry
+
+
+class RateLimitError(Exception):
+    """Raised when DeepSeek returns a rate-limit response (HTTP 429/5xx) before any bytes are yielded."""
+
+    def __init__(self, message: str, retry_after: float = 0.0):
+        super().__init__(message)
+        self.retry_after = retry_after  # Seconds to wait, from Retry-After header if present
+
+
+def _parse_retry_after(value: str | None) -> float:
+    """Parse Retry-After header value into seconds. Returns 0.0 if absent or unparseable."""
+    if not value:
+        return 0.0
+    try:
+        return max(0.0, float(value))
+    except (ValueError, TypeError):
+        return 0.0
+
 
 def _response_indicates_invalid_token(content: bytes) -> bool:
     """Return True if DeepSeek response payload indicates token invalidation."""
@@ -108,7 +129,11 @@ async def proxy_to_deepseek_stream(
     json_data: dict[str, Any] | None = None,
     params: dict[str, Any] | None = None,
 ) -> AsyncGenerator[bytes, None]:
-    """Proxy request to DeepSeek backend as a streaming response, yield bytes."""
+    """Proxy request to DeepSeek backend as a streaming response, yield bytes.
+
+    Raises:
+        RateLimitError: If DeepSeek responds with HTTP 429 or 5xx before any bytes are yielded.
+    """
     url = f"{DEEPSEEK_BASE_URL}/{path}"
     logger.debug(f"[proxy:stream] {method} {path}")
     auth_headers = get_auth_headers()
@@ -126,6 +151,19 @@ async def proxy_to_deepseek_stream(
             json=json_data,
             params=params,
         ) as resp:
+            if resp.status_code == 429:
+                body = await resp.aread()
+                retry_after = _parse_retry_after(resp.headers.get("Retry-After"))
+                raise RateLimitError(
+                    f"DeepSeek rate limited (HTTP 429): {body[:200]!r}",
+                    retry_after=retry_after,
+                )
+            if resp.status_code >= 500:
+                body = await resp.aread()
+                raise RateLimitError(
+                    f"DeepSeek server error (HTTP {resp.status_code}): {body[:200]!r}",
+                    retry_after=5.0,
+                )
             async for chunk in resp.aiter_bytes():
                 yield chunk
 
@@ -363,45 +401,66 @@ async def stream_chat_completion(
             return
         parent_message_id = None
 
-    # Get PoW
-    pow_response = get_pow_response()
-    if not pow_response:
-        logger.error("[stream_chat_completion] Failed to get PoW response")
-        yield b"data: {\"error\": \"Failed to get PoW response\"}\n\n"
-        yield b"event: finish\ndata: {}\n\n"
-        return
+    # Get PoW and stream, with retry on rate limit
+    last_rate_limit_error: RateLimitError | None = None
+    for rate_limit_attempt in range(_MAX_RATE_LIMIT_RETRIES):
+        if rate_limit_attempt > 0:
+            delay = max(
+                _RATE_LIMIT_BASE_DELAY * (2 ** (rate_limit_attempt - 1)),
+                last_rate_limit_error.retry_after if last_rate_limit_error else 0.0,
+            )
+            logger.warning(
+                f"[stream_chat] rate limited by DeepSeek, "
+                f"retrying in {delay:.1f}s (attempt {rate_limit_attempt + 1}/{_MAX_RATE_LIMIT_RETRIES})"
+            )
+            await asyncio.sleep(delay)
 
-    # Build payload for DeepSeek
-    payload = {
-        "chat_session_id": chat_session_id,
-        "parent_message_id": parent_message_id,
-        "preempt": False,
-        "prompt": prompt,
-        "ref_file_ids": ref_file_ids or [],
-        "search_enabled": search_enabled,
-        "thinking_enabled": thinking_enabled,
-    }
+        # Fresh PoW each attempt (challenges expire)
+        pow_response = get_pow_response()
+        if not pow_response:
+            logger.error("[stream_chat_completion] Failed to get PoW response")
+            yield b"data: {\"error\": \"Failed to get PoW response\"}\n\n"
+            yield b"event: finish\ndata: {}\n\n"
+            return
 
-    headers = {"x-ds-pow-response": pow_response}
+        # Build payload for DeepSeek
+        payload = {
+            "chat_session_id": chat_session_id,
+            "parent_message_id": parent_message_id,
+            "preempt": False,
+            "prompt": prompt,
+            "ref_file_ids": ref_file_ids or [],
+            "search_enabled": search_enabled,
+            "thinking_enabled": thinking_enabled,
+        }
+        headers = {"x-ds-pow-response": pow_response}
 
-    # Stream and collect only if we need to extract message_id
-    collected = b"" if chat_session_id else None
-    async for chunk in proxy_to_deepseek_stream(
-        "POST",
-        _PATH_COMPLETION,
-        headers=headers,
-        json_data=payload,
-    ):
-        if collected is not None:
-            collected += chunk
-        yield chunk
+        try:
+            # Stream and collect only if we need to extract message_id
+            collected = b"" if chat_session_id else None
+            async for chunk in proxy_to_deepseek_stream(
+                "POST",
+                _PATH_COMPLETION,
+                headers=headers,
+                json_data=payload,
+            ):
+                if collected is not None:
+                    collected += chunk
+                yield chunk
 
-    # Update session with message_id after stream completes
-    if collected is not None:
-        msg_id = parse_sse_response_message_id(collected)
-        if msg_id:
-            await ParentMsgStore.get_instance().aupdate_parent_message_id(chat_session_id, msg_id)
-            logger.info(f"[stream_chat] session={chat_session_id} updated parent_msg_id={msg_id}")
+            # Update session with message_id after stream completes
+            if collected is not None:
+                msg_id = parse_sse_response_message_id(collected)
+                if msg_id:
+                    await ParentMsgStore.get_instance().aupdate_parent_message_id(chat_session_id, msg_id)
+                    logger.info(f"[stream_chat] session={chat_session_id} updated parent_msg_id={msg_id}")
+            return  # Success
+
+        except RateLimitError as e:
+            last_rate_limit_error = e
+            if rate_limit_attempt == _MAX_RATE_LIMIT_RETRIES - 1:
+                logger.error(f"[stream_chat] all rate-limit retries exhausted: {e}")
+                raise
 
 
 async def stream_edit_message(
@@ -435,38 +494,59 @@ async def stream_edit_message(
             yield b"event: finish\ndata: {}\n\n"
             return
 
-    # Get PoW
-    pow_response = get_pow_response()
-    if not pow_response:
-        logger.error("[edit_message] Failed to get PoW response")
-        yield b"data: {\"error\": \"Failed to get PoW response\"}\n\n"
-        yield b"event: finish\ndata: {}\n\n"
-        return
+    # Get PoW and stream, with retry on rate limit
+    last_rate_limit_error: RateLimitError | None = None
+    for rate_limit_attempt in range(_MAX_RATE_LIMIT_RETRIES):
+        if rate_limit_attempt > 0:
+            delay = max(
+                _RATE_LIMIT_BASE_DELAY * (2 ** (rate_limit_attempt - 1)),
+                last_rate_limit_error.retry_after if last_rate_limit_error else 0.0,
+            )
+            logger.warning(
+                f"[edit_message] rate limited by DeepSeek, "
+                f"retrying in {delay:.1f}s (attempt {rate_limit_attempt + 1}/{_MAX_RATE_LIMIT_RETRIES})"
+            )
+            await asyncio.sleep(delay)
 
-    # Build payload with fixed message_id=1
-    payload = {
-        "chat_session_id": chat_session_id,
-        "message_id": 1,  # Fixed message_id for stateless conversation
-        "prompt": prompt,
-        "search_enabled": search_enabled,
-        "thinking_enabled": thinking_enabled,
-    }
+        # Fresh PoW each attempt (challenges expire)
+        pow_response = get_pow_response()
+        if not pow_response:
+            logger.error("[edit_message] Failed to get PoW response")
+            yield b"data: {\"error\": \"Failed to get PoW response\"}\n\n"
+            yield b"event: finish\ndata: {}\n\n"
+            return
 
-    headers = {"x-ds-pow-response": pow_response}
+        # Build payload with fixed message_id=1
+        payload = {
+            "chat_session_id": chat_session_id,
+            "message_id": 1,  # Fixed message_id for stateless conversation
+            "prompt": prompt,
+            "search_enabled": search_enabled,
+            "thinking_enabled": thinking_enabled,
+        }
+        headers = {"x-ds-pow-response": pow_response}
 
-    # Stream from DeepSeek
-    collected = b""
-    async for chunk in proxy_to_deepseek_stream(
-        "POST",
-        _PATH_EDIT_MESSAGE,
-        headers=headers,
-        json_data=payload,
-    ):
-        collected += chunk
-        yield chunk
+        try:
+            # Stream from DeepSeek
+            collected = b""
+            async for chunk in proxy_to_deepseek_stream(
+                "POST",
+                _PATH_EDIT_MESSAGE,
+                headers=headers,
+                json_data=payload,
+            ):
+                collected += chunk
+                yield chunk
 
-    # Update parent_message_id for future calls
-    msg_id = parse_sse_response_message_id(collected)
-    if msg_id:
-        await ParentMsgStore.get_instance().aupdate_parent_message_id(chat_session_id, msg_id)
-        logger.info(f"[edit_message] session={chat_session_id} updated parent_msg_id={msg_id}")
+            # Update parent_message_id for future calls
+            msg_id = parse_sse_response_message_id(collected)
+            if msg_id:
+                await ParentMsgStore.get_instance().aupdate_parent_message_id(chat_session_id, msg_id)
+                logger.info(f"[edit_message] session={chat_session_id} updated parent_msg_id={msg_id}")
+            return  # Success
+
+        except RateLimitError as e:
+            last_rate_limit_error = e
+            if rate_limit_attempt == _MAX_RATE_LIMIT_RETRIES - 1:
+                logger.error(f"[edit_message] all rate-limit retries exhausted: {e}")
+                raise

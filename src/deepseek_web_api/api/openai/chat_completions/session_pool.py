@@ -7,6 +7,7 @@ Architecture:
 - Each session in the pool maintains message_id=1
 - The pool is "stateless" from the client's perspective (no session_id needed)
 - Internally, we track which sessions are initialized (have message_id=1 created)
+- Pool size is hard-capped; callers block until a session is available or timeout
 """
 
 import asyncio
@@ -46,6 +47,12 @@ class AllSessionsBusyError(SessionPoolError):
     pass
 
 
+class SessionPoolFullError(SessionPoolError):
+    """Raised when the pool is at capacity and no session becomes available within the timeout."""
+
+    pass
+
+
 class StatelessSessionPool:
     """Pool of sessions for stateless chat completions.
 
@@ -54,6 +61,8 @@ class StatelessSessionPool:
     to minimize session creation overhead.
 
     The pool provides:
+    - Hard cap on concurrent sessions (pool_size) to avoid triggering DeepSeek rate limits
+    - Callers block in acquire() until a session is available or acquire_timeout expires
     - Per-session locking to prevent concurrent use
     - Lazy initialization (first request uses completion, subsequent use edit_message)
     - Automatic cleanup of idle sessions
@@ -64,49 +73,104 @@ class StatelessSessionPool:
         self,
         max_idle_seconds: float = 300,
         pool_size: int = 10,
+        acquire_timeout: float = 30.0,
     ):
         """Initialize the session pool.
 
         Args:
             max_idle_seconds: Sessions idle longer than this are eligible for cleanup
-            pool_size: Target number of sessions to keep in the pool
+            pool_size: Hard cap on concurrent sessions; callers wait when this is reached
+            acquire_timeout: Seconds to wait for an available session before raising
         """
         self._sessions: dict[str, StatelessSession] = {}
-        self._lock = asyncio.Lock()
+        self._condition = asyncio.Condition()
+        self._pending_creates: int = 0  # Sessions being created (reserved slots)
         self._max_idle_seconds = max_idle_seconds
         self._pool_size = pool_size
+        self._acquire_timeout = acquire_timeout
         self._cleanup_task: Optional[asyncio.Task] = None
-        logger.info(f"[StatelessSessionPool] initialized with pool_size={pool_size}, max_idle={max_idle_seconds}s")
+        logger.info(
+            f"[StatelessSessionPool] initialized with pool_size={pool_size}, "
+            f"max_idle={max_idle_seconds}s, acquire_timeout={acquire_timeout}s"
+        )
 
     async def acquire(self) -> StatelessSession:
         """Acquire an available session from the pool.
 
-        Returns the first available (unlocked) session. If all sessions are busy,
-        creates a new session.
+        Returns the first available (unlocked) session. If the pool is below
+        capacity, creates a new session. If the pool is at capacity and all
+        sessions are busy, blocks until one is released or the timeout expires.
 
         Returns:
             StatelessSession: An available session (already locked)
 
         Raises:
-            AllSessionsBusyError: If unable to acquire any session (should not happen
-                                 as we create new sessions as fallback)
+            SessionPoolFullError: If no session becomes available within acquire_timeout
+            SessionPoolError: If session creation fails
         """
-        # Fast path: try to find an unlocked session
-        async with self._lock:
-            for session in self._sessions.values():
-                if not session.lock.locked():
-                    # Found an available session
-                    await session.lock.acquire()
-                    session.last_access_time = time.time()
-                    logger.debug(f"[pool] acquired session {session.chat_session_id[:8]}..., locked={session.lock.locked()}")
-                    return session
+        deadline = asyncio.get_event_loop().time() + self._acquire_timeout
 
-            # All sessions are busy or pool is empty - create new session
-            new_session = await self._create_session()
-            self._sessions[new_session.chat_session_id] = new_session
-            await new_session.lock.acquire()
-            logger.info(f"[pool] created new session {new_session.chat_session_id[:8]}..., pool size={len(self._sessions)}")
-            return new_session
+        while True:
+            # Phase 1: Check pool state under condition lock
+            async with self._condition:
+                # Try to find an available unlocked session
+                for session in self._sessions.values():
+                    if not session.lock.locked():
+                        await session.lock.acquire()
+                        session.last_access_time = time.time()
+                        logger.debug(f"[pool] acquired existing session {session.chat_session_id[:8]}...")
+                        return session
+
+                # Can we grow the pool? (count pending creates as reserved slots)
+                effective_size = len(self._sessions) + self._pending_creates
+                if effective_size < self._pool_size:
+                    # Reserve a slot; will create outside the lock below
+                    self._pending_creates += 1
+                    logger.info(
+                        f"[pool] growing pool: {len(self._sessions)} sessions + "
+                        f"{self._pending_creates} pending = {effective_size + 1}/{self._pool_size}"
+                    )
+                    # Fall through to Phase 2 after exiting this block
+                else:
+                    # Pool at capacity, all sessions busy — wait for a release notification
+                    remaining = deadline - asyncio.get_event_loop().time()
+                    if remaining <= 0:
+                        raise SessionPoolFullError(
+                            f"Pool exhausted: all {self._pool_size} sessions busy, "
+                            f"timed out after {self._acquire_timeout:.1f}s"
+                        )
+                    logger.info(
+                        f"[pool] all {self._pool_size} sessions busy, "
+                        f"waiting up to {remaining:.1f}s for one to free up..."
+                    )
+                    try:
+                        await asyncio.wait_for(self._condition.wait(), timeout=remaining)
+                    except asyncio.TimeoutError:
+                        raise SessionPoolFullError(
+                            f"Pool exhausted: all {self._pool_size} sessions busy, "
+                            f"timed out after {self._acquire_timeout:.1f}s"
+                        )
+                    continue  # Woken by notify_all() — re-check at top of loop
+
+            # Phase 2: Create new session outside lock (avoids blocking other acquires during HTTP call)
+            try:
+                new_session = await self._create_session()
+            except Exception as e:
+                async with self._condition:
+                    self._pending_creates -= 1
+                    self._condition.notify_all()  # Free the reserved slot for waiters
+                raise SessionPoolError(f"Failed to create DeepSeek session: {e}") from e
+
+            # Phase 3: Register in pool and lock it
+            async with self._condition:
+                self._pending_creates -= 1
+                self._sessions[new_session.chat_session_id] = new_session
+                await new_session.lock.acquire()
+                logger.info(
+                    f"[pool] created session {new_session.chat_session_id[:8]}..., "
+                    f"pool size={len(self._sessions)}"
+                )
+                return new_session
 
     async def release(self, session: StatelessSession, error: bool = False) -> None:
         """Release a session back to the pool.
@@ -121,7 +185,11 @@ class StatelessSessionPool:
             logger.warning(f"[pool] session {session.chat_session_id[:8]}... marked for re-init due to error")
 
         session.last_access_time = time.time()
-        session.lock.release()
+
+        async with self._condition:
+            session.lock.release()
+            self._condition.notify_all()  # Wake any callers waiting in acquire()
+
         logger.debug(f"[pool] released session {session.chat_session_id[:8]}..., error={error}")
 
     async def cleanup_idle(self) -> int:
@@ -133,7 +201,7 @@ class StatelessSessionPool:
         now = time.time()
         removed = 0
 
-        async with self._lock:
+        async with self._condition:
             to_remove = [
                 sid
                 for sid, session in self._sessions.items()
@@ -240,7 +308,11 @@ async def get_pool() -> StatelessSessionPool:
     if _pool is None:
         async with _pool_lock:
             if _pool is None:
-                _pool = StatelessSessionPool()
+                from ....core.config import get_pool_size, get_pool_acquire_timeout
+                _pool = StatelessSessionPool(
+                    pool_size=get_pool_size(),
+                    acquire_timeout=get_pool_acquire_timeout(),
+                )
                 _pool.start_cleanup()
     return _pool
 
