@@ -34,7 +34,7 @@ uv --version
 
 1. 在浏览器访问项目的 [主页面](https://github.com/NIyueeE/deepseek-web-api), 点击下载ZIP文件
 
-![image-20260327161548910](assets/image-20260327161548910.png)
+![download_zip](assets/download_zip.png)
 
 2. 把下载的文件解压到一个**你找得到的文件夹**（比如桌面）
 
