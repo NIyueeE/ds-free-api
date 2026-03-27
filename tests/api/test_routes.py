@@ -17,11 +17,7 @@ def client():
 class TestLocalApiAuthMiddleware:
     def test_root_endpoint_is_not_protected(self, client, monkeypatch):
         monkeypatch.setattr(
-            "deepseek_web_api.core.local_api_auth.get_auth_required",
-            lambda: True,
-        )
-        monkeypatch.setattr(
-            "deepseek_web_api.core.local_api_auth.get_enabled_auth_tokens",
+            "deepseek_web_api.core.local_api_auth.get_auth_tokens",
             lambda: ["secret-token"],
         )
 
@@ -32,11 +28,7 @@ class TestLocalApiAuthMiddleware:
 
     def test_v1_models_requires_auth_when_token_configured(self, client, monkeypatch):
         monkeypatch.setattr(
-            "deepseek_web_api.core.local_api_auth.get_auth_required",
-            lambda: False,
-        )
-        monkeypatch.setattr(
-            "deepseek_web_api.core.local_api_auth.get_enabled_auth_tokens",
+            "deepseek_web_api.core.local_api_auth.get_auth_tokens",
             lambda: ["secret-token"],
         )
 
@@ -47,11 +39,7 @@ class TestLocalApiAuthMiddleware:
 
     def test_v1_models_accepts_bearer_token(self, client, monkeypatch):
         monkeypatch.setattr(
-            "deepseek_web_api.core.local_api_auth.get_auth_required",
-            lambda: False,
-        )
-        monkeypatch.setattr(
-            "deepseek_web_api.core.local_api_auth.get_enabled_auth_tokens",
+            "deepseek_web_api.core.local_api_auth.get_auth_tokens",
             lambda: ["secret-token"],
         )
 
@@ -65,11 +53,7 @@ class TestLocalApiAuthMiddleware:
 
     def test_v1_models_accepts_x_api_key(self, client, monkeypatch):
         monkeypatch.setattr(
-            "deepseek_web_api.core.local_api_auth.get_auth_required",
-            lambda: False,
-        )
-        monkeypatch.setattr(
-            "deepseek_web_api.core.local_api_auth.get_enabled_auth_tokens",
+            "deepseek_web_api.core.local_api_auth.get_auth_tokens",
             lambda: ["secret-token"],
         )
 
@@ -81,13 +65,9 @@ class TestLocalApiAuthMiddleware:
         assert response.status_code == 200
         assert response.json()["object"] == "list"
 
-    def test_v1_models_remains_open_when_auth_not_required_and_no_tokens(self, client, monkeypatch):
+    def test_v1_models_remains_open_when_no_tokens_configured(self, client, monkeypatch):
         monkeypatch.setattr(
-            "deepseek_web_api.core.local_api_auth.get_auth_required",
-            lambda: False,
-        )
-        monkeypatch.setattr(
-            "deepseek_web_api.core.local_api_auth.get_enabled_auth_tokens",
+            "deepseek_web_api.core.local_api_auth.get_auth_tokens",
             lambda: [],
         )
 
@@ -96,60 +76,37 @@ class TestLocalApiAuthMiddleware:
         assert response.status_code == 200
         assert response.json()["object"] == "list"
 
-    def test_v1_models_rejects_disabled_or_unknown_token(self, client, monkeypatch):
+    def test_v1_models_rejects_unknown_token(self, client, monkeypatch):
         monkeypatch.setattr(
-            "deepseek_web_api.core.local_api_auth.get_auth_required",
-            lambda: False,
-        )
-        monkeypatch.setattr(
-            "deepseek_web_api.core.local_api_auth.get_enabled_auth_tokens",
-            lambda: ["enabled-token"],
+            "deepseek_web_api.core.local_api_auth.get_auth_tokens",
+            lambda: ["valid-token"],
         )
 
         response = client.get(
             "/v1/models",
-            headers={"Authorization": "Bearer disabled-token"},
+            headers={"Authorization": "Bearer invalid-token"},
         )
 
         assert response.status_code == 401
         assert response.json()["detail"] == "Invalid or missing local API key"
 
-    def test_v1_models_accepts_any_enabled_token_in_mixed_mode(self, client, monkeypatch):
+    def test_v1_models_accepts_any_configured_token(self, client, monkeypatch):
         monkeypatch.setattr(
-            "deepseek_web_api.core.local_api_auth.get_auth_required",
-            lambda: False,
-        )
-        monkeypatch.setattr(
-            "deepseek_web_api.core.local_api_auth.get_enabled_auth_tokens",
-            lambda: ["legacy-secret", "formal-secret"],
+            "deepseek_web_api.core.local_api_auth.get_auth_tokens",
+            lambda: ["token-a", "token-b"],
         )
 
-        legacy_response = client.get(
+        response_a = client.get(
             "/v1/models",
-            headers={"Authorization": "Bearer legacy-secret"},
+            headers={"Authorization": "Bearer token-a"},
         )
-        formal_response = client.get(
+        response_b = client.get(
             "/v1/models",
-            headers={"X-API-Key": "formal-secret"},
+            headers={"X-API-Key": "token-b"},
         )
 
-        assert legacy_response.status_code == 200
-        assert formal_response.status_code == 200
-
-    def test_v1_models_requires_auth_when_required_without_tokens(self, client, monkeypatch):
-        monkeypatch.setattr(
-            "deepseek_web_api.core.local_api_auth.get_auth_required",
-            lambda: True,
-        )
-        monkeypatch.setattr(
-            "deepseek_web_api.core.local_api_auth.get_enabled_auth_tokens",
-            lambda: [],
-        )
-
-        response = client.get("/v1/models")
-
-        assert response.status_code == 401
-        assert response.json()["detail"] == "Invalid or missing local API key"
+        assert response_a.status_code == 200
+        assert response_b.status_code == 200
 
 
 class TestCorsConfiguration:

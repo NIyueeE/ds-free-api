@@ -2,27 +2,20 @@
 log_level = "WARNING"
 
 [server]
-host = "127.0.0.1"  # 建议保持 loopback，仅本机访问
+host = "127.0.0.1"  # 建议保持 loopback，仅本机访问；如需公网访问，必须配置 auth.tokens
 port = 5001
 reload = true
-api_key = ""  # 兼容模式 token；DEEPSEEK_WEB_API_KEY 会覆盖它，并与 [auth.tokens] 合并生效
 cors_origins = ["*"]  # 生产环境建议改成明确白名单
 cors_allow_credentials = false
 cors_allow_methods = ["*"]
 cors_allow_headers = ["*"]
 
 [auth]
-required = false  # true 且没有任何 enabled token 时，/v0 和 /v1 会统一返回 401
-
-[[auth.tokens]]
-name = "prod-gateway"
-token = ""
-enabled = true
-
-[[auth.tokens]]
-name = "ops-debug"
-token = ""
-enabled = false
+# 鉴权 token 列表；非空列表表示需要鉴权，空列表仅在 loopback 时允许
+# 非 loopback host 必须配置 token，否则启动会失败（fail-fast 安全机制）
+tokens = []
+# 示例（配置一个或多个 token）：
+# tokens = ["sk-prod-xxx", "sk-backup-yyy"]
 
 [account]
 email = "your_email@example.com"  # 邮箱登录（优先）

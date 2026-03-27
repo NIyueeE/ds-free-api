@@ -37,24 +37,14 @@ uv run python main.py
 host = "127.0.0.1"                  # Recommended: keep loopback-only
 port = 5001
 reload = true
-api_key = ""                         # Compatibility token; merged with [auth.tokens]
 cors_origins = ["*"]                 # Recommended: replace with explicit origins for browser clients
 cors_allow_credentials = false
 cors_allow_methods = ["*"]
 cors_allow_headers = ["*"]
 
 [auth]
-required = false                     # true with zero enabled tokens => all /v0 and /v1 requests return 401
-
-[[auth.tokens]]
-name = "prod-gateway"
-token = "sk-prod-xxx"
-enabled = true
-
-[[auth.tokens]]
-name = "ops-debug"
-token = "sk-ops-yyy"
-enabled = false
+tokens = []                          # Configure one or more tokens to enable auth
+# Example: tokens = ["sk-prod-xxx", "sk-backup-yyy"]
 
 [account]
 email = "your_email@example.com"   # Email login (priority)
@@ -65,12 +55,9 @@ token = ""                         # Optional, system will auto-manage (saved af
 ```
 
 **Security**:
-- Preferred configuration is `[auth]` plus `[[auth.tokens]]`.
-- `[server].api_key` and environment variable `DEEPSEEK_WEB_API_KEY` remain supported as compatibility mode inputs.
-- `DEEPSEEK_WEB_API_KEY` overrides `[server].api_key`, and that legacy token is merged with all enabled `auth.tokens`.
-- If at least one enabled token exists, all `/v0/*` and `/v1/*` endpoints require either `Authorization: Bearer <token>` or `X-API-Key: <token>`.
-- If `auth.required = true` and no enabled token exists, the server still starts but every `/v0/*` and `/v1/*` request returns `401`.
-- `main.py` now reads `[server].host`, `[server].port`, and `[server].reload`.
+- `[auth].tokens` is a simple string array. Non-empty array means auth is required; empty array means anonymous access (only safe for loopback).
+- If at least one token is configured, all `/v0/*` and `/v1/*` endpoints require either `Authorization: Bearer <token>` or `X-API-Key: <token>`.
+- **Fail-fast protection**: If `[server].host` is non-loopback (e.g., `0.0.0.0`) and `[auth].tokens` is empty, the server will refuse to start.
 - CORS is configurable via `[server].cors_*`. The default remains permissive for compatibility, but you should narrow `cors_origins` before exposing browser clients.
 - You should still run the service on `127.0.0.1` unless you intentionally expose it.
 
@@ -114,6 +101,38 @@ OpenAI-compatible chat completions endpoint with full tool calling support and s
 - Supports `tool_calls` and multi-turn tool conversations
 - Streaming/non-streaming responses
 - Internally uses `edit_message` API for stateless sessions
+
+**Supported OpenAI Parameters**:
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `model` | string | Model ID, defaults to `deepseek-web-chat` |
+| `messages` | array | OpenAI-style message array |
+| `stream` | bool | Streaming response, default `false` |
+| `tools` | array | Tool definitions for function calling |
+| `extra_body` | dict | DeepSeek-specific parameters (see below) |
+
+**DeepSeek-specific parameters via `extra_body`**:
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `search_enabled` | bool | `false` | Enable DeepSeek web backend's search feature |
+| `thinking_enabled` | bool | `true` for reasoner model, `false` for chat | Enable thinking. For `deepseek-web-chat`: enables thinking output; for `deepseek-web-reasoner`: set to `false` to disable thinking |
+
+Example with OpenAI SDK:
+```python
+from openai import OpenAI
+
+client = OpenAI(api_key="your-token", base_url="http://localhost:5001/v1")
+response = client.chat.completions.create(
+    model="deepseek-web-chat",
+    messages=[{"role": "user", "content": "Hello"}],
+    extra_body={
+        "search_enabled": True,      # Enable DeepSeek web search
+        "thinking_enabled": True,    # Enable thinking output (for chat model)
+    }
+)
+```
 
 ### Endpoint Details
 

@@ -59,7 +59,7 @@ class TestChatCompletionsRoute:
             json={
                 "model": "deepseek-web-chat",
                 "messages": [{"role": "user", "content": "hello"}],
-                "search_enabled": True,
+                "extra_body": {"search_enabled": True},
                 "stream": False,
             },
         )
@@ -113,11 +113,7 @@ class TestChatCompletionsRoute:
             return FailingPool()
 
         monkeypatch.setattr(
-            "deepseek_web_api.core.local_api_auth.get_auth_required",
-            lambda: False,
-        )
-        monkeypatch.setattr(
-            "deepseek_web_api.core.local_api_auth.get_enabled_auth_tokens",
+            "deepseek_web_api.core.local_api_auth.get_auth_tokens",
             lambda: [],
         )
         monkeypatch.setattr(

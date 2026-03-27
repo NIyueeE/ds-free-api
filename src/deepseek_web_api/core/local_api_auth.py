@@ -4,7 +4,7 @@ import secrets
 
 from fastapi import HTTPException, Request, status
 
-from .config import get_auth_required, get_enabled_auth_tokens
+from .config import get_auth_tokens
 
 
 def _extract_request_token(request: Request) -> str:
@@ -26,11 +26,10 @@ def requires_local_api_auth(path: str) -> bool:
 
 
 def verify_local_api_auth(request: Request) -> None:
-    """Validate local API auth against enabled auth tokens."""
-    expected_tokens = get_enabled_auth_tokens()
-    auth_required = get_auth_required()
+    """Validate local API auth against configured tokens."""
+    expected_tokens = get_auth_tokens()
 
-    if not auth_required and not expected_tokens:
+    if not expected_tokens:
         return
 
     provided_token = _extract_request_token(request)

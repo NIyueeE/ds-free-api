@@ -20,14 +20,25 @@ router = APIRouter()
 
 
 class ChatCompletionRequest(BaseModel):
-    """OpenAI-compatible chat completion request."""
+    """OpenAI-compatible chat completion request.
+
+    DeepSeek-specific parameters (search_enabled, thinking_enabled) can be
+    passed via the OpenAI SDK's extra_body mechanism:
+
+        client.chat.completions.create(
+            model="deepseek-web-chat",
+            messages=[...],
+            extra_body={
+                "search_enabled": True,
+                "thinking_enabled": False,
+            }
+        )
+    """
     model: str = "deepseek-web-chat"
     messages: List[dict]
     stream: bool = False
-    temperature: Optional[float] = None
-    search_enabled: bool = False
-    thinking_enabled: bool = True
     tools: Optional[List[dict]] = None
+    extra_body: Optional[dict] = None
 
 
 def _stream_error_chunks(message: str):
@@ -62,9 +73,11 @@ async def chat_completions(request: Request):
     prompt = convert_messages_to_prompt(validated.messages, validated.tools)
     logger.debug(f"Constructed prompt:\n{prompt}")
 
-    # Model-specific overrides: reasoning model gets thinking, others don't
-    thinking_enabled = "reasoner" in validated.model
-    search_enabled = validated.search_enabled
+    # Extract DeepSeek-specific parameters from extra_body
+    extra = validated.extra_body or {}
+    search_enabled = extra.get("search_enabled", False)
+    # Model-specific override: reasoning model enables thinking by default
+    thinking_enabled = extra.get("thinking_enabled", "reasoner" in validated.model)
 
     pool = await get_pool()
 
