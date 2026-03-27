@@ -17,6 +17,8 @@
 
 ## 快速开始
 
+**初次使用？** 请参照[新手友好的安装指南](https://./docs/INSTALL.md)获取分步说明（仅需 `uv`）。
+
 ```bash
 # 配置账号
 cp config.toml.example config.toml

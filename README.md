@@ -17,6 +17,8 @@ Inspired by [deepseek2api](https://github.com/iidamie/deepseek2api). Transparent
 
 ## Quick Start
 
+**New here?** Follow the [beginner-friendly installation guide](./docs/INSTALL.md) for step-by-step instructions (only `uv` required).
+
 ```bash
 # Configure account
 cp config.toml.example config.toml
