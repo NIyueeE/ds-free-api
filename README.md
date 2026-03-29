@@ -126,6 +126,7 @@ OpenAI-compatible chat completions endpoint with full tool calling support and s
 | `extra_body` | dict | DeepSeek-specific parameters (see below) |
 | `response_format` | dict | Controls output format. `{"type":"json_object"}` instructs the model to respond only with valid JSON. `{"type":"json_schema","json_schema":{...}}` provides a JSON Schema to constrain output. This parameter is proxy-layer only and not forwarded to DeepSeek. |
 | `stop` | string \| array | Sequences where the model should stop generating. When a stop sequence is detected in the stream, output is truncated before the sequence itself. Supports single string or array of strings. This parameter is proxy-layer only and not forwarded to DeepSeek. |
+| `stream_options` | dict | Stream options, supports `include_usage` (boolean) to include token usage statistics in streaming responses. |
 
 > **Note on `tools`**: Each tool supports a `strict` property inside `function` (e.g., `{"type": "function", "function": {"name": "...", "strict": true}}`). When `strict: true`, the model is instructed to strictly follow the JSON Schema — do not add undefined fields, do not omit required fields, do not use values outside enum lists. Both natural language description and JSON Schema block are included in the prompt for maximum constraint fidelity.
 
@@ -160,6 +161,40 @@ Core mechanism:
 - Buffer size is dynamically calculated: `max(len("[TOOL🛠️]"), max(stop sequence length)) * 2`
 - Stop detection is placed before every yield point, ensuring stop sequences themselves are never output
 - Reuses the `force_end` mechanism from tool call parsing
+
+### Stream Options (stream_options parameter)
+
+When streaming with `stream: true`, you can optionally provide `stream_options` to control streaming behavior:
+
+```python
+client.chat.completions.create(
+    model="deepseek-web-chat",
+    messages=[{"role": "user", "content": "Hello"}],
+    stream=True,
+    stream_options={"include_usage": True}
+)
+```
+
+**Parameters:**
+| Option | Type | Description |
+|--------|------|-------------|
+| `include_usage` | boolean | When `true`, each streaming chunk includes a `usage: null` field. Additionally, a final chunk with `choices: []` and token usage statistics is sent before `data: [DONE]`. Defaults to `false`. |
+
+> **Note**: Token usage statistics (`prompt_tokens`, `completion_tokens`, `total_tokens`) are always zero because DeepSeek's streaming SSE does not provide token counts.
+
+### Streaming Response Format
+
+When `include_usage: true`, streaming responses include additional `usage` fields:
+
+**Regular chunks** (each chunk):
+```json
+{"choices":[{"index":0,"delta":{"content":"Hello"}}],"usage":null,"id":"chatcmpl-xxx","object":"chat.completion.chunk","created":...,"model":"..."}
+```
+
+**Final usage chunk** (before `data: [DONE]`):
+```json
+{"choices":[],"usage":{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0},"id":"chatcmpl-xxx","object":"chat.completion.chunk","created":...,"model":"..."}
+```
 
 ### Endpoint Details
 
