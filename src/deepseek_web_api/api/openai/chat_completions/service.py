@@ -20,6 +20,8 @@ from .tools import (
     convert_tool_json_to_openai,
 )
 
+_UNSET_USAGE = object()
+
 
 def _flush_with_stop(buffer: str, stop_sequences: list[str]) -> tuple[str, bool]:
     """Check buffer for stop sequences. Truncate at first occurrence.
@@ -61,6 +63,7 @@ async def stream_generator(
     tools: Optional[List[dict]] = None,
     session: "StatelessSession" = None,
     stop_sequences: Optional[List[str]] = None,
+    include_usage: bool = False,
 ):
     """Stream DeepSeek SSE and convert to OpenAI SSE format.
 
@@ -86,10 +89,13 @@ async def stream_generator(
     req_id = f"chatcmpl-{uuid.uuid4().hex}"
     created_time = int(time.time())
 
-    def make_chunk(content=None, reasoning=None, finish_reason=None, tool_calls=None):
+    def make_chunk(content=None, reasoning=None, finish_reason=None, tool_calls=None, role=None, usage=_UNSET_USAGE, final=False):
         delta = {"content": content, "reasoning_content": reasoning}
+        if role is not None:
+            delta["role"] = role
         if tool_calls:
             delta["tool_calls"] = tool_calls
+
         choice = {"index": 0, "delta": delta}
         if finish_reason:
             choice["finish_reason"] = finish_reason
@@ -101,6 +107,15 @@ async def stream_generator(
             "model": model_name,
             "choices": [choice],
         }
+
+        if final:
+            # 末尾 usage chunk: choices=[], usage=usage dict
+            chunk_data["choices"] = []
+            chunk_data["usage"] = usage
+        elif usage is not _UNSET_USAGE:
+            # include_usage=true 时的普通 chunk: usage=null
+            chunk_data["usage"] = None
+
         chunk_str = f"data: {json.dumps(chunk_data, ensure_ascii=False)}\n\n"
         logger.debug(f"Yielding chunk: {chunk_str}")
         return chunk_str
@@ -115,6 +130,8 @@ async def stream_generator(
     extra_prefix = ""  # Prefetched content from edit_message nested dict format
     sse_buffer = ""
     buffer_window = get_stream_window(stop_sequences or [])
+
+    yield make_chunk(role="assistant", usage=include_usage if include_usage else _UNSET_USAGE)
 
     async for line in stream_func(
         prompt=prompt,
@@ -163,7 +180,7 @@ async def stream_generator(
                         prefix_to_yield, stopped = _flush_with_stop(extra_prefix, stop_sequences or [])
                         if prefix_to_yield:
                             for char in prefix_to_yield:
-                                yield make_chunk(content=char)
+                                yield make_chunk(content=char, usage=include_usage if include_usage else _UNSET_USAGE)
                         if stopped:
                             force_end = True
                         extra_prefix = ""
@@ -177,13 +194,13 @@ async def stream_generator(
                                 tool_calls_result = convert_tool_json_to_openai(json_str, tools)
                                 if tool_calls_result:
                                     for tc in tool_calls_result:
-                                        yield make_chunk(tool_calls=[tc])
+                                        yield make_chunk(tool_calls=[tc], usage=include_usage if include_usage else _UNSET_USAGE)
                                         had_tool_call = True
                         after_end = stream_buff[end_idx + len(TOOL_END_MARKER):]
                         to_yield, stopped = _flush_with_stop(after_end, stop_sequences or [])
                         if to_yield:
                             for char in to_yield:
-                                yield make_chunk(content=char)
+                                yield make_chunk(content=char, usage=include_usage if include_usage else _UNSET_USAGE)
                         if stopped:
                             force_end = True
                     elif stream_buff:
@@ -191,7 +208,7 @@ async def stream_generator(
                         to_yield, stopped = _flush_with_stop(stream_buff, stop_sequences or [])
                         if to_yield:
                             for char in to_yield:
-                                yield make_chunk(content=char)
+                                yield make_chunk(content=char, usage=include_usage if include_usage else _UNSET_USAGE)
                         if stopped:
                             force_end = True
                     break
@@ -260,7 +277,7 @@ async def stream_generator(
                                 to_yield, stopped = _flush_with_stop(before_start, stop_sequences or [])
                                 if to_yield:
                                     for char in to_yield:
-                                        yield make_chunk(content=char)
+                                        yield make_chunk(content=char, usage=include_usage if include_usage else _UNSET_USAGE)
                                 if stopped:
                                     force_end = True
                                 # Keep only from start marker onwards in buffer
@@ -274,7 +291,7 @@ async def stream_generator(
                                     to_yield, stopped = _flush_with_stop(fallen, stop_sequences or [])
                                     if to_yield:
                                         for char in to_yield:
-                                            yield make_chunk(content=char)
+                                            yield make_chunk(content=char, usage=include_usage if include_usage else _UNSET_USAGE)
                                     if stopped:
                                         force_end = True
                                 stream_buff = stream_buff[-buffer_window:]
@@ -289,10 +306,10 @@ async def stream_generator(
                                     tool_calls_result = convert_tool_json_to_openai(json_str, tools)
                                     if tool_calls_result:
                                         for tc in tool_calls_result:
-                                            yield make_chunk(tool_calls=[tc])
+                                            yield make_chunk(tool_calls=[tc], usage=include_usage if include_usage else _UNSET_USAGE)
                                             had_tool_call = True
                                         # Successfully parsed tool calls - send finish and [DONE]
-                                        yield make_chunk(finish_reason="tool_calls")
+                                        yield make_chunk(finish_reason="tool_calls", usage=include_usage if include_usage else _UNSET_USAGE)
                                         yield "data: [DONE]\n\n"
                                         logger.debug("Tool calls parsed, forcing stream end")
                                         force_end = True
@@ -307,17 +324,19 @@ async def stream_generator(
                     else:
                         to_yield, stopped = _flush_with_stop(v, stop_sequences or [])
                         if to_yield:
-                            yield make_chunk(content=to_yield)
+                            yield make_chunk(content=to_yield, usage=include_usage if include_usage else _UNSET_USAGE)
                         if stopped:
                             force_end = True
                 else:
                     # reasoning mode
-                    yield make_chunk(reasoning=v)
+                    yield make_chunk(reasoning=v, usage=include_usage if include_usage else _UNSET_USAGE)
 
     if not client_stream_closed:
         # Send finish reason once unless we already closed the client stream on tool_calls
-        yield make_chunk(finish_reason="tool_calls" if had_tool_call else "stop")
+        yield make_chunk(finish_reason="tool_calls" if had_tool_call else "stop", usage=include_usage if include_usage else _UNSET_USAGE)
         logger.debug("Yielding [DONE]")
+        if include_usage:
+            yield make_chunk(usage={"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}, final=True)
         yield "data: [DONE]\n\n"
 
     # Mark session as initialized after successful completion (message_id=1 now exists)

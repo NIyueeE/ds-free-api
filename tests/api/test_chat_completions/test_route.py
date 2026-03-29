@@ -38,7 +38,7 @@ class TestChatCompletionsRoute:
         async def fake_get_pool():
             return fake_pool
 
-        async def fake_stream_generator(prompt, model_name, search_enabled, thinking_enabled, tools, session, stop_sequences=None):
+        async def fake_stream_generator(prompt, model_name, search_enabled, thinking_enabled, tools, session, stop_sequences=None, include_usage=False):
             captured["search_enabled"] = search_enabled
             yield (
                 'data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}\n\n'
@@ -73,7 +73,7 @@ class TestChatCompletionsRoute:
         async def fake_get_pool():
             return fake_pool
 
-        async def empty_stream_generator(prompt, model_name, search_enabled, thinking_enabled, tools, session, stop_sequences=None):
+        async def empty_stream_generator(prompt, model_name, search_enabled, thinking_enabled, tools, session, stop_sequences=None, include_usage=False):
             if False:
                 yield None
 

@@ -38,6 +38,7 @@ class ChatCompletionRequest(BaseModel):
     Proxy-layer parameters (not forwarded to DeepSeek):
         - tool_choice: Controls which tools the model may call (default "auto")
         - parallel_tool_calls: Whether to allow parallel tool calls (default True)
+        - stream_options: Controls streaming behavior (e.g., include_usage)
     """
     model: str = "deepseek-web-chat"
     messages: List[dict]
@@ -48,6 +49,7 @@ class ChatCompletionRequest(BaseModel):
     extra_body: Optional[dict] = None
     response_format: Optional[dict] = None
     stop: Optional[Union[str, List[str]]] = None
+    stream_options: Optional[dict] = None
 
 
 def _stream_error_chunks(message: str):
@@ -94,6 +96,9 @@ async def chat_completions(request: Request):
     # Model-specific override: reasoning model enables thinking by default
     thinking_enabled = extra.get("thinking_enabled", "reasoner" in validated.model)
 
+    # Extract stream_options
+    include_usage = validated.stream_options.get("include_usage", False) if validated.stream_options else False
+
     pool = await get_pool()
 
     _MAX_SESSION_RETRIES = 3
@@ -131,7 +136,7 @@ async def chat_completions(request: Request):
                     stop_seqs = [validated.stop] if isinstance(validated.stop, str) else validated.stop
                     async for chunk in stream_generator(
                         prompt, validated.model, search_enabled, thinking_enabled,
-                        validated.tools, session, stop_seqs
+                        validated.tools, session, stop_seqs, include_usage
                     ):
                         if not started_yielding:
                             buffered.append(chunk)
@@ -223,7 +228,7 @@ async def chat_completions(request: Request):
             stop_seqs = [validated.stop] if isinstance(validated.stop, str) else validated.stop
             async for chunk in stream_generator(
                 prompt, validated.model, search_enabled, thinking_enabled,
-                validated.tools, session, stop_seqs
+                validated.tools, session, stop_seqs, include_usage
             ):
                 chunks.append(chunk)
             break  # Success
