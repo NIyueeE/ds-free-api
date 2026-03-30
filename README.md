@@ -257,7 +257,7 @@ Implements stateless sessions via `edit_message` API:
 **Session Pool**:
 - Maintains a bounded pool of DeepSeek sessions (`pool_size`, default 10)
 - When all sessions are busy, new requests wait up to `pool_acquire_timeout` seconds (default 30s) before returning HTTP 503
-- Idle sessions are cleaned up automatically every `max_idle_seconds/2` (default 150s)
+- Idle sessions are cleaned up automatically every `max_idle_seconds/2` (default 150s, configurable via `max_idle_seconds` in `[server]`)
 - Hard cap prevents flooding DeepSeek with unbounded concurrent session creations
 
 **Rate Limit Handling**:

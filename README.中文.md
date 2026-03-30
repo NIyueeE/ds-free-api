@@ -254,7 +254,7 @@ client.chat.completions.create(
 **Session Pool**：
 - 维护有上限的 DeepSeek session 池（`pool_size`，默认 10）
 - 当所有 session 繁忙时，新请求最多等待 `pool_acquire_timeout` 秒（默认 30s），超时返回 HTTP 503
-- 空闲 session 每 `max_idle_seconds/2`（默认 150s）自动清理
+- 空闲 session 每 `max_idle_seconds/2`（默认 150s，可通过 `[server]` 下的 `max_idle_seconds` 配置）自动清理
 - 硬上限防止并发请求时无限制地创建 session 触发限流
 
 **限流处理**：
