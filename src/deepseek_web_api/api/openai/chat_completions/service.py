@@ -300,7 +300,7 @@ async def stream_generator(
                                 extra_prefix = ""
                             if current_mode == "output":
                                 if tools:
-                                    tool_buff += initial
+                                    stream_buff += initial
                                 else:
                                     yield make_chunk(content=initial)
                             else:
