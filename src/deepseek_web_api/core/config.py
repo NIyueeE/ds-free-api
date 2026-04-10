@@ -442,6 +442,17 @@ def get_pool_acquire_timeout() -> float:
     )
 
 
+def get_max_idle_seconds() -> float:
+    """Seconds of inactivity before an idle session is eligible for cleanup."""
+    return float(
+        _get_env_or_config(
+            "DEEPSEEK_WEB_MAX_IDLE_SECONDS",
+            "max_idle_seconds",
+            300.0,
+        )
+    )
+
+
 def get_server_host() -> str:
     return str(_get_env_or_config("DEEPSEEK_WEB_HOST", "host", "127.0.0.1")).strip()
 
