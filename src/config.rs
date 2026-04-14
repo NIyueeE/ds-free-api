@@ -124,7 +124,7 @@ fn default_user_agent() -> String {
 
 /// 默认 X-Client-Version
 fn default_client_version() -> String {
-    "1.8.0".to_string()
+    "2.0.0".to_string()
 }
 
 /// 默认 X-Client-Platform
@@ -185,4 +185,148 @@ pub enum ConfigError {
     Validation(String),
     #[error("命令行参数错误: {0}")]
     Cli(String),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    fn minimal_toml(extra: &str) -> String {
+        format!(
+            r#"
+[[accounts]]
+email = "test@example.com"
+mobile = ""
+area_code = ""
+password = "pass"
+
+[server]
+host = "127.0.0.1"
+port = 5317
+{extra}
+"#
+        )
+    }
+
+    fn write_temp(content: &str) -> tempfile::NamedTempFile {
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        f.write_all(content.as_bytes()).unwrap();
+        f
+    }
+
+    // --- Config::load ---
+
+    #[test]
+    fn load_minimal_config() {
+        let f = write_temp(&minimal_toml(""));
+        let cfg = Config::load(f.path()).unwrap();
+        assert_eq!(cfg.accounts.len(), 1);
+        assert_eq!(cfg.accounts[0].email, "test@example.com");
+        assert_eq!(cfg.server.port, 5317);
+    }
+
+    #[test]
+    fn load_missing_file_returns_io_error() {
+        let err = Config::load("/nonexistent/path/config.toml").unwrap_err();
+        assert!(matches!(err, ConfigError::Io(_)));
+    }
+
+    #[test]
+    fn load_invalid_toml_returns_toml_error() {
+        let f = write_temp("this is not toml ][");
+        let err = Config::load(f.path()).unwrap_err();
+        assert!(matches!(err, ConfigError::Toml(_)));
+    }
+
+    // --- validate ---
+
+    #[test]
+    fn validate_rejects_empty_accounts() {
+        // accounts = [] 是合法 TOML，但 validate() 应拒绝空账号列表
+        let toml = r#"
+accounts = []
+
+[server]
+host = "127.0.0.1"
+port = 5317
+"#;
+        let f = write_temp(toml);
+        let err = Config::load(f.path()).unwrap_err();
+        assert!(matches!(err, ConfigError::Validation(_)));
+    }
+
+    #[test]
+    fn validate_rejects_empty_model_types() {
+        let toml = minimal_toml("[deepseek]\nmodel_types = []");
+        let f = write_temp(&toml);
+        let err = Config::load(f.path()).unwrap_err();
+        assert!(matches!(err, ConfigError::Validation(_)));
+    }
+
+    // --- load_with_args ---
+
+    #[test]
+    fn load_with_args_uses_c_flag() {
+        let f = write_temp(&minimal_toml(""));
+        let path = f.path().to_str().unwrap().to_string();
+        let args = vec!["prog".to_string(), "-c".to_string(), path];
+        let cfg = Config::load_with_args(args.into_iter()).unwrap();
+        assert_eq!(cfg.server.host, "127.0.0.1");
+    }
+
+    #[test]
+    fn load_with_args_c_without_path_returns_cli_error() {
+        let args = vec!["prog".to_string(), "-c".to_string()];
+        let err = Config::load_with_args(args.into_iter()).unwrap_err();
+        assert!(matches!(err, ConfigError::Cli(_)));
+    }
+
+    // --- model_registry ---
+
+    #[test]
+    fn model_registry_maps_types_correctly() {
+        let cfg = DeepSeekConfig::default();
+        let registry = cfg.model_registry();
+        assert_eq!(
+            registry.get("deepseek-default").map(|s| s.as_str()),
+            Some("default")
+        );
+        assert_eq!(
+            registry.get("deepseek-expert").map(|s| s.as_str()),
+            Some("expert")
+        );
+    }
+
+    #[test]
+    fn model_registry_is_lowercase() {
+        let cfg = DeepSeekConfig {
+            model_types: vec!["Default".to_string(), "EXPERT".to_string()],
+            ..DeepSeekConfig::default()
+        };
+        let registry = cfg.model_registry();
+        assert!(registry.contains_key("deepseek-default"));
+        assert!(registry.contains_key("deepseek-expert"));
+    }
+
+    // --- 默认值回归 ---
+
+    #[test]
+    fn default_client_version_is_not_too_low() {
+        // 回归：1.3.0 / 1.7.9 会触发 CLIENT_VERSION_TOO_LOW (code 40005)
+        // 必须 >= 2.0.0，此处钉住当前默认值不低于该阈值
+        let version = default_client_version();
+        let parts: Vec<u32> = version.split('.').filter_map(|s| s.parse().ok()).collect();
+        assert!(
+            parts[0] >= 2,
+            "client_version 默认值 {version} 低于 2.0.0，会触发 CLIENT_VERSION_TOO_LOW"
+        );
+    }
+
+    #[test]
+    fn api_tokens_default_empty() {
+        let f = write_temp(&minimal_toml(""));
+        let cfg = Config::load(f.path()).unwrap();
+        assert!(cfg.server.api_tokens.is_empty());
+    }
 }
