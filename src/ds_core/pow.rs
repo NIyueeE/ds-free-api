@@ -1,8 +1,8 @@
 //! PoW 计算器 —— 基于 DeepSeek WASM 的 DeepSeekHashV1 算法实现
 //!
-//! WASM 符号（如 __wbindgen_export_0）为编译时生成，若 DeepSeek 更新 WASM 可能导致启动失败。
+//! alloc 导出符号名（__wbindgen_export_N）在启动时动态探测，不依赖硬编码名称。
 
-use wasmtime::{AsContextMut, Engine, InstancePre, Linker, Module, Store};
+use wasmtime::{AsContextMut, Engine, ExternType, InstancePre, Linker, Module, Store, ValType};
 
 // 复用 client 的 ChallengeData，避免重复定义
 pub use crate::ds_core::client::ChallengeData as Challenge;
@@ -11,6 +11,7 @@ pub use crate::ds_core::client::ChallengeData as Challenge;
 pub struct PowSolver {
     engine: Engine,
     instance_pre: InstancePre<()>,
+    alloc_fn: String,
 }
 
 #[derive(Debug)]
@@ -58,6 +59,7 @@ impl PowSolver {
         let engine = Engine::default();
         let module =
             Module::new(&engine, wasm_bytes).map_err(|e| PowError::WasmInit(e.to_string()))?;
+        let alloc_fn = find_alloc_export(&module)?;
         let linker = Linker::new(&engine);
         let instance_pre = linker
             .instantiate_pre(&module)
@@ -65,6 +67,7 @@ impl PowSolver {
         Ok(Self {
             engine,
             instance_pre,
+            alloc_fn,
         })
     }
 
@@ -87,11 +90,7 @@ impl PowSolver {
             .get_typed_func::<i32, i32>(&mut store, "__wbindgen_add_to_stack_pointer")
             .map_err(|e| PowError::Execution(e.to_string()))?;
         let alloc = instance
-            .get_typed_func::<(i32, i32), i32>(&mut store, "__wbindgen_export_0")
-            // BUG(潜在): __wbindgen_export_0 是 wasm-bindgen 自动生成的符号名。
-            // 如果 DeepSeek 重新编译 WASM（调整导出顺序），此函数可能变为 __wbindgen_export_1。
-            // 后果：启动失败，返回 PowError::Execution（安全失败）。
-            // 修复方案：动态探测符号名（遍历 exports 匹配签名），或添加 WASM 版本校验。
+            .get_typed_func::<(i32, i32), i32>(&mut store, &self.alloc_fn)
             .map_err(|e| PowError::Execution(e.to_string()))?;
         let wasm_solve = instance
             .get_typed_func::<(i32, i32, i32, i32, i32, f64), ()>(&mut store, "wasm_solve")
@@ -166,4 +165,31 @@ fn write_string(
         .write(store.as_context_mut(), ptr as usize, bytes)
         .map_err(|e| PowError::Execution(e.to_string()))?;
     Ok((ptr, len))
+}
+
+/// 在 WASM 导出中动态查找 alloc 函数（签名：(i32, i32) -> i32，名称前缀 __wbindgen_export_）。
+/// 避免硬编码 __wbindgen_export_0，防止 DeepSeek 重新编译 WASM 后符号名变更导致启动失败。
+fn find_alloc_export(module: &Module) -> Result<String, PowError> {
+    let i32_i32_to_i32 = |ft: &wasmtime::FuncType| {
+        let mut p = ft.params();
+        let mut r = ft.results();
+        matches!(p.next(), Some(ValType::I32))
+            && matches!(p.next(), Some(ValType::I32))
+            && p.next().is_none()
+            && matches!(r.next(), Some(ValType::I32))
+            && r.next().is_none()
+    };
+
+    module
+        .exports()
+        .find(|e| {
+            e.name().starts_with("__wbindgen_export_")
+                && matches!(e.ty(), ExternType::Func(ft) if i32_i32_to_i32(&ft))
+        })
+        .map(|e| e.name().to_string())
+        .ok_or_else(|| {
+            PowError::WasmInit(
+                "找不到 alloc 导出（__wbindgen_export_* with (i32,i32)->i32）".to_string(),
+            )
+        })
 }

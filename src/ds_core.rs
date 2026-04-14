@@ -12,6 +12,8 @@ pub use completions::ChatRequest;
 
 use std::pin::Pin;
 
+use sha2::{Digest, Sha256};
+
 use crate::config::Config;
 use accounts::AccountPool;
 use client::{ClientError, DsClient};
@@ -59,6 +61,7 @@ impl DeepSeekCore {
 
         let wasm_bytes = client.get_wasm().await?;
         let solver = PowSolver::new(&wasm_bytes)?;
+        log::info!("WASM loaded: sha256={:x}", Sha256::digest(&wasm_bytes));
 
         let mut pool =
             AccountPool::new(config.accounts.clone(), config.deepseek.model_types.clone());
