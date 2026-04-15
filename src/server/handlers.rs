@@ -11,7 +11,8 @@ use axum::{
 use bytes::Bytes;
 use std::sync::Arc;
 
-use crate::openai_adapter::{OpenAIAdapter, StreamResponse};
+use crate::openai_adapter::request::AdapterRequest;
+use crate::openai_adapter::{OpenAIAdapter, OpenAIAdapterError, StreamResponse};
 
 use super::error::ServerError;
 use super::stream::SseBody;
@@ -22,36 +23,66 @@ pub(crate) struct AppState {
     pub(crate) adapter: Arc<OpenAIAdapter>,
 }
 
-/// 判断请求体是否要求流式响应
-fn is_stream(body: &[u8]) -> bool {
-    serde_json::from_slice::<serde_json::Value>(body)
-        .ok()
-        .and_then(|v| v.get("stream").and_then(|s| s.as_bool()))
-        .unwrap_or(false)
-}
-
-/// POST /v1/chat/completions
+/// POST /v1/chat/completions (解析一次 JSON，根据 stream 字段走不同路径)
 pub(crate) async fn chat_completions(
     State(state): State<AppState>,
     body: Bytes,
 ) -> Result<Response, ServerError> {
-    let streaming = is_stream(&body);
+    let req = state.adapter.parse_request(&body)?;
+    log::debug!(target: "http::request", "POST /v1/chat/completions stream={}", req.stream);
 
-    log::debug!(target: "http::request", "POST /v1/chat/completions stream={}", streaming);
+    match handle_chat(&state.adapter, req).await {
+        Ok(ChatResult::Stream(stream)) => {
+            log::debug!(target: "http::response", "200 SSE stream started");
+            Ok(SseBody::new(stream).into_response())
+        }
+        Ok(ChatResult::Json(json)) => {
+            log::debug!(target: "http::response", "200 JSON response {} bytes", json.len());
+            Ok((
+                StatusCode::OK,
+                [(header::CONTENT_TYPE, "application/json")],
+                Body::from(json),
+            )
+                .into_response())
+        }
+        Err(e) => Err(e.into()),
+    }
+}
 
-    if streaming {
-        let stream: StreamResponse = state.adapter.chat_completions_stream(&body).await?;
+enum ChatResult {
+    Stream(StreamResponse),
+    Json(Vec<u8>),
+}
+
+async fn handle_chat(
+    adapter: &OpenAIAdapter,
+    req: AdapterRequest,
+) -> Result<ChatResult, OpenAIAdapterError> {
+    let model = req.model.clone();
+    let stop = req.stop.clone();
+    let stream = req.stream;
+    let include_usage = req.include_usage;
+    let include_obfuscation = req.include_obfuscation;
+    let prompt_tokens = req.prompt_tokens;
+
+    let ds_stream = adapter.try_chat(req.ds_req).await?;
+
+    if stream {
         log::debug!(target: "http::response", "200 SSE stream started");
-        Ok(SseBody::new(stream).into_response())
+        Ok(ChatResult::Stream(crate::openai_adapter::response::stream(
+            ds_stream,
+            model,
+            include_usage,
+            include_obfuscation,
+            stop,
+            prompt_tokens,
+        )))
     } else {
-        let json = state.adapter.chat_completions(&body).await?;
+        let json =
+            crate::openai_adapter::response::aggregate(ds_stream, model, stop, prompt_tokens)
+                .await?;
         log::debug!(target: "http::response", "200 JSON response {} bytes", json.len());
-        Ok((
-            StatusCode::OK,
-            [(header::CONTENT_TYPE, "application/json")],
-            Body::from(json),
-        )
-            .into_response())
+        Ok(ChatResult::Json(json))
     }
 }
 

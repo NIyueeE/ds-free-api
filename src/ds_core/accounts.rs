@@ -60,8 +60,6 @@ impl Drop for AccountGuard {
 }
 
 pub struct AccountPool {
-    creds: Vec<AccountConfig>,
-    model_types: Vec<String>,
     accounts: Vec<Arc<Account>>,
     index: AtomicUsize,
 }
@@ -86,20 +84,21 @@ pub enum PoolError {
 }
 
 impl AccountPool {
-    pub fn new(creds: Vec<AccountConfig>, model_types: Vec<String>) -> Self {
+    pub fn new() -> Self {
         Self {
-            creds,
-            model_types,
             accounts: Vec::new(),
             index: AtomicUsize::new(0),
         }
     }
 
-    pub async fn init(&mut self, client: &DsClient, solver: &PowSolver) -> Result<(), PoolError> {
+    pub async fn init(
+        &mut self,
+        creds: Vec<AccountConfig>,
+        model_types: Vec<String>,
+        client: &DsClient,
+        solver: &PowSolver,
+    ) -> Result<(), PoolError> {
         use futures::future::join_all;
-
-        let creds = std::mem::take(&mut self.creds);
-        let model_types = std::mem::take(&mut self.model_types);
 
         // 全并发初始化所有账号
         let futures: Vec<_> = creds
@@ -109,14 +108,18 @@ impl AccountPool {
                 let solver = solver.clone();
                 let model_types = model_types.clone();
                 async move {
-                    let mobile = creds.mobile.clone();
+                    let display_id = if creds.mobile.is_empty() {
+                        creds.email.clone()
+                    } else {
+                        creds.mobile.clone()
+                    };
                     match init_account(&creds, &client, &solver, &model_types).await {
                         Ok(account) => {
-                            info!(target: "ds_core::accounts", "账号 {} 初始化成功", mobile);
+                            info!(target: "ds_core::accounts", "账号 {} 初始化成功", display_id);
                             Some(Arc::new(account))
                         }
                         Err(e) => {
-                            warn!(target: "ds_core::accounts", "账号 {} 初始化失败: {}", mobile, e);
+                            warn!(target: "ds_core::accounts", "账号 {} 初始化失败: {}", display_id, e);
                             None
                         }
                     }
@@ -225,7 +228,7 @@ async fn init_account(
         }
     }
 
-    Err(last_error.unwrap())
+    Err(last_error.expect("循环至少执行一次"))
 }
 
 async fn try_init_account(
@@ -304,16 +307,12 @@ async fn health_check(
     solver: &PowSolver,
     model_type: &str,
 ) -> Result<(), PoolError> {
-    debug!(target: "ds_core::accounts", "[health_check] model_type={} 步骤1: 获取 PoW challenge...", model_type);
+    debug!(target: "ds_core::accounts", "health_check model_type={}", model_type);
     let challenge = client.create_pow_challenge(token).await?;
-    debug!(target: "ds_core::accounts", "[health_check] 步骤1完成: challenge 获取成功");
 
-    debug!(target: "ds_core::accounts", "[health_check] 步骤2: 计算 PoW...");
     let result = solver.solve(&challenge)?;
     let pow_header = result.to_header();
-    debug!(target: "ds_core::accounts", "[health_check] 步骤2完成: PoW 计算成功");
 
-    debug!(target: "ds_core::accounts", "[health_check] 步骤3: 发送 completion 请求...");
     let payload = CompletionPayload {
         chat_session_id: session_id.to_string(),
         parent_message_id: None,
@@ -325,16 +324,12 @@ async fn health_check(
         preempt: false,
     };
 
-    debug!(target: "ds_core::accounts", "[health_check] 步骤4: 获取 completion 流...");
     let mut stream = client.completion(token, &pow_header, &payload).await?;
-    debug!(target: "ds_core::accounts", "[health_check] 步骤4: 消费流确保消息写入...");
-    // 消费流
+    // 消费流确保消息写入
     while let Some(chunk) = stream.try_next().await? {
-        let text = String::from_utf8_lossy(&chunk);
-        debug!(target: "ds_core::accounts", "[health_check] 收到数据: {}", text.trim());
+        let _ = chunk;
     }
-    debug!(target: "ds_core::accounts", "[health_check] 步骤4完成: 流消费完成");
 
-    debug!(target: "ds_core::accounts", "[health_check] 全部完成!");
+    debug!(target: "ds_core::accounts", "health_check 完成 model_type={}", model_type);
     Ok(())
 }

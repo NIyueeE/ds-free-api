@@ -68,7 +68,7 @@ src/
 **Additional files not in src/**:
 - `examples/openai_adapter_cli/` — JSON request samples (basic_chat, reasoning_search, stop_sequence, stream_options, tool_call)
 - `examples/*-script.txt` — Scripted input for CLI examples
-- `py_test/` — Python test suite (gitignored)
+- `py-e2e-tests/` — Python end-to-end test suite (gitignored runtime artifacts)
 
 ## Key Architectural Patterns
 
@@ -114,8 +114,11 @@ Errors propagate upward with translation at module boundaries:
 
 `client.rs` parses DeepSeek's wrapper envelope `{code, msg, data: {biz_code, biz_msg, biz_data}}` via `Envelope::into_result()`.
 
+### Prompt Token Calculation
+DeepSeek's free API returns `0` for `prompt_tokens`. The adapter computes this server-side in `request.rs` using `tiktoken-rs` with the `cl100k_base` tokenizer (same family as GPT-4). The count is stored in `AdapterRequest.prompt_tokens`, passed through `handlers.rs`, and injected into the final `Usage` object in `converter.rs` for both streaming and non-streaming responses.
+
 ### Tool Calls via XML
-The adapter injects tool definitions as natural language into the prompt and parses `<tool_calls>` XML in the response back into structured `tool_calls` JSON. Custom (non-function) tools with grammar/text format definitions are also supported.
+The adapter injects tool definitions as natural language into the prompt and parses `<tool_calls>` XML in the response back into structured `tool_calls` JSON. Custom (non-function) tools with grammar/text format definitions are also supported. When a tool call is triggered, `finish_reason` may be `"tool_calls"` instead of `"stop"`.
 
 ### Obfuscation
 Random base64 padding in SSE chunks to reach a target response size (~512 bytes), controlled by `stream_options.include_obfuscation` (defaults to true).
@@ -175,7 +178,7 @@ Optional Bearer token auth via `[[server.api_tokens]]` in config; no auth when e
 # Setup (do not commit config.toml)
 cp config.example.toml config.toml
 
-# One-pass check (check + clippy + fmt)
+# One-pass check (check + clippy + fmt + audit + unused deps)
 just check
 
 # Run the HTTP server
@@ -194,8 +197,17 @@ just openai-adapter-cli
 just test-adapter-request
 just test-adapter-response
 
-# Run all tests
+# Run a single Rust test
+cargo test converter_emits_role_and_content -- --exact
+
+# Run all Rust tests
 cargo test
+
+# Run Python e2e tests (requires server running on port 5317)
+just e2e
+
+# Start server with e2e test config
+just e2e-serve
 
 # Individual checks
 cargo check

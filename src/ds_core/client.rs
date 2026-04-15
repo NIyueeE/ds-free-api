@@ -8,7 +8,6 @@
 
 use bytes::Bytes;
 use futures::{Stream, TryStreamExt};
-use log::debug;
 use reqwest::multipart::{Form, Part};
 use serde::{Deserialize, Serialize};
 use std::pin::Pin;
@@ -124,11 +123,8 @@ pub struct UserInfo {
 }
 
 #[derive(Debug, Deserialize)]
-pub struct CreateSessionData {
+struct CreateSessionData {
     pub id: String,
-    pub seq_id: i64,
-    pub agent: String,
-    pub model_type: String,
 }
 
 // 包装类型：biz_data 里面嵌套了 chat_session 对象
@@ -138,14 +134,15 @@ struct CreateSessionWrapper {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 pub struct ChallengeData {
     pub algorithm: String,
     pub challenge: String,
     pub salt: String,
     pub signature: String,
     pub difficulty: i64,
-    pub expire_at: i64,
     pub expire_after: i64,
+    pub expire_at: i64,
     pub target_path: String,
 }
 
@@ -266,9 +263,6 @@ impl DsClient {
         envelope.into_result()
     }
 
-    /// login 和 auth_headers() 都手动构造了 User-Agent header。
-    /// 如果将来需要添加新的公共 header（如 x-client-version），建议提取 base_headers() 方法。
-    /// 当前只有两处，保持内联更简单。
     pub async fn login(&self, payload: &LoginPayload) -> Result<LoginData, ClientError> {
         let mut h = reqwest::header::HeaderMap::new();
         h.insert(
@@ -296,11 +290,6 @@ impl DsClient {
             .await?;
         let wrapper: CreateSessionWrapper = Self::parse_envelope(resp).await?;
         let data = wrapper.chat_session;
-        debug!(
-            target: "ds_core::client",
-            "创建 session: id={}, seq_id={}, agent={}, model_type={}",
-            data.id, data.seq_id, data.agent, data.model_type
-        );
         Ok(data.id)
     }
 
@@ -329,11 +318,6 @@ impl DsClient {
             .await?;
         let wrapper: ChallengeWrapper = Self::parse_envelope(resp).await?;
         let challenge = wrapper.challenge;
-        debug!(
-            target: "ds_core::client",
-            "获取 PoW challenge: algorithm={}, difficulty={}, expire_at={}, expire_after={}",
-            challenge.algorithm, challenge.difficulty, challenge.expire_at, challenge.expire_after
-        );
         Ok(challenge)
     }
 

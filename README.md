@@ -6,13 +6,13 @@
 
 [English](README.en.md)
 
-将免费的deepseek网页端对话反代并适配转换为标准的api协议 (目前只有 openai_chat_completions 支持, 后续会增加)
+将免费的 DeepSeek 网页端对话反代并适配转换为标准的 OpenAI API 协议 (目前支持 openai_chat_completions，包括流式返回与工具调用)。
 
-支持rust原生多端高性能, 单可执行文件+单toml配置文件
+支持 Rust 原生多端高性能，单可执行文件 + 单 TOML 配置文件。
 
 ## 快速开始
 
-去 [release](https://github.com/NIyueeE/deepseek-web-api/releases) 下载对应平台后解压即可
+去 [releases](https://github.com/NIyueeE/ds-free-api/releases) 下载对应平台后解压即可。
 
 ```
   .
@@ -25,7 +25,7 @@
 
 ### 配置
 
-复制 config.example.toml 为 config.toml 和可执行文件保持在同一个路径下, 或者使用 `./ds-free-api -c <config_path>` 指定配置路径
+复制 `config.example.toml` 为 `config.toml`，和可执行文件保持在同一个路径下，或者使用 `./ds-free-api -c <config_path>` 指定配置路径。
 
 ### 运行
 
@@ -40,7 +40,7 @@
 RUST_LOG=debug ./ds-free-api
 ```
 
-这里只展示必填项, 一个账号一个并发量 (但好像是最多二个并发)
+这里只展示必填项。一个账号对应一个并发量（但 DeepSeek 好像最多限制二个并发）。
 
 ```toml
 [server]
@@ -52,7 +52,7 @@ port = 5317
 # token = "sk-your-token"
 # description = "开发测试"
 
-# 二选一或者都填, 手机号码好像只支持+86地区, 所以好像可以通过魔法在海外地区使用邮箱无限注册账号
+# 邮箱和手机号二选一或都填，手机号目前好像只支持 +86
 [[accounts]]
 email = "user1@example.com"
 mobile = ""
@@ -60,45 +60,47 @@ area_code = ""
 password = "pass1"
 ```
 
-这里分享一个免费的测试用账号, 不要发敏感信息 (虽然程序每次会收尾删除会话, 但是可能会遗留)
+这里分享一个免费的测试账号，不要发敏感信息（虽然程序每次会收尾删除会话，但是可能会遗留）。
 
 ```text
 rivigol378@tatefarm.com
 test12345
 ```
 
-想要自己多整几个账号并发的话, 可以研究一下临时邮箱(有些可能不行), 然后加魔法在国际版中多注册几个账号
+想要自己多整几个账号并发的话，可以研究一下临时邮箱（有些可能不行），然后加魔法在国际版中多注册几个账号。
 
-这里推荐一个临时邮箱网站[temp-mail.org](https://temp-mail.org/en/10minutemail)
+推荐临时邮箱网站：[temp-mail.org](https://temp-mail.org/en/10minutemail)
 
 ## API 端点
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | GET | `/` | 健康检查 |
-| POST | `/v1/chat/completions` | 聊天补全 |
+| POST | `/v1/chat/completions` | 聊天补全（支持流式与工具调用） |
 | GET | `/v1/models` | 模型列表 |
 | GET | `/v1/models/{id}` | 模型详情 |
 
 ## 模型映射
 
-`config.toml` 中 `model_types` (默认 `["default", "expert"]`) 自动映射：
+`config.toml` 中 `model_types`（默认 `["default", "expert"]`）自动映射：
 
 | OpenAI 模型 ID | DeepSeek 类型 |
 |----------------|--------------|
 | `deepseek-default` | 快速模式 |
 | `deepseek-expert` | 专家模式 |
 
-开启`深度思考`：请求体中加 `"reasoning_effort": "high"`, 这里可以看 [Create chat completion | OpenAI API Reference](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create) , 反正非 `"none"` 即可
+### 能力开关
 
-开启`智能搜索`：请求体中加 `"web_search_options": {"search_context_size": "high"}` (感觉没必要, 好像就算开了之后也很难触发, 模型会忘记自己能够使用内部搜索, 原因不明)
+- **深度思考**：默认已开启。如需显式关闭，请求体中加 `"reasoning_effort": "none"`。
+- **智能搜索**：默认关闭。如需开启，请求体中加 `"web_search_options": {"search_context_size": "high"}`。
+- **工具调用**：按 OpenAI 标准传入 `tools` 与 `tool_choice` 即可。当模型决定调用工具时，返回的 `finish_reason` 为 `tool_calls`。
 
 ## 开发
 
-需要 Rust 1.94.1+ (见 `rust-toolchain.toml`)。
+需要 Rust 1.94.1+（见 `rust-toolchain.toml`）。
 
 ```bash
-# 检查 (check + clippy + fmt)
+# 一键检查 (check + clippy + fmt + audit + unused deps)
 just check
 
 # 运行测试
@@ -110,9 +112,15 @@ just serve
 # CLI 示例
 just ds-core-cli
 just openai-adapter-cli
+
+# Python e2e 测试（需要服务已在 5317 端口运行）
+just e2e
+
+# 使用 e2e 专属配置启动服务
+just e2e-serve
 ```
 
-简要架构图:
+简要架构图：
 
 ```mermaid
 graph LR
@@ -139,7 +147,7 @@ graph LR
     Chat -- "SSE 流" --> Response --> Server
 ```
 
-数据管道:
+数据管道：
 
 - **请求**: `JSON body` → `normalize` 校验/默认值 → `tools` 提取 → `prompt` ChatML 构建 → `resolver` 模型映射 → `ChatRequest`
 - **响应**: `DeepSeek SSE bytes` → `sse_parser` → `state` 补丁状态机 → `converter` 格式转换 → `tool_parser` XML 解析 → `StopStream` 截断 → `OpenAI SSE bytes`

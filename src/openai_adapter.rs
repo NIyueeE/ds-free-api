@@ -12,8 +12,8 @@ use std::pin::Pin;
 use crate::ds_core::{CoreError, DeepSeekCore};
 
 mod models;
-mod request;
-mod response;
+pub(crate) mod request;
+pub(crate) mod response;
 mod types;
 
 /// 流式响应类型
@@ -38,13 +38,21 @@ impl OpenAIAdapter {
         })
     }
 
+    /// 解析请求体为 AdapterRequest（仅解析一次，避免双重 JSON 解析）
+    pub(crate) fn parse_request(
+        &self,
+        body: &[u8],
+    ) -> Result<request::AdapterRequest, OpenAIAdapterError> {
+        request::parse(body, &self.model_registry)
+    }
+
     /// POST /v1/chat/completions (非流式)
     ///
     /// 底层复用流式接口，将 SSE 流聚合为单个 JSON 对象后返回
     pub async fn chat_completions(&self, body: &[u8]) -> Result<Vec<u8>, OpenAIAdapterError> {
         let req = request::parse(body, &self.model_registry)?;
         let stream = self.try_chat(req.ds_req).await?;
-        response::aggregate(stream, req.model, req.stop).await
+        response::aggregate(stream, req.model, req.stop, req.prompt_tokens).await
     }
 
     /// POST /v1/chat/completions (流式)
@@ -60,11 +68,12 @@ impl OpenAIAdapter {
             req.include_usage,
             req.include_obfuscation,
             req.stop,
+            req.prompt_tokens,
         ))
     }
 
     /// 内部辅助：对 `Overloaded` 进行短延迟轮询重试，降低瞬时并发峰值导致的失败率
-    async fn try_chat(
+    pub(crate) async fn try_chat(
         &self,
         req: crate::ds_core::ChatRequest,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<Bytes, CoreError>> + Send>>, CoreError> {

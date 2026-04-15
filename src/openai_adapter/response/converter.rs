@@ -6,8 +6,6 @@ use std::task::{Context, Poll};
 use futures::Stream;
 use pin_project_lite::pin_project;
 
-use log::debug;
-
 use crate::openai_adapter::OpenAIAdapterError;
 use crate::openai_adapter::types::{ChatCompletionChunk, ChunkChoice, Delta, Usage};
 
@@ -24,6 +22,16 @@ fn make_usage_chunk(usage: Usage, model: &str) -> ChatCompletionChunk {
         usage: Some(usage),
         service_tier: None,
         system_fingerprint: None,
+    }
+}
+
+fn make_usage(prompt_tokens: u32, completion_tokens: u32) -> Usage {
+    Usage {
+        prompt_tokens,
+        completion_tokens,
+        total_tokens: prompt_tokens + completion_tokens,
+        prompt_tokens_details: None,
+        completion_tokens_details: None,
     }
 }
 
@@ -54,6 +62,7 @@ pin_project! {
         model: String,
         include_usage: bool,
         include_obfuscation: bool,
+        prompt_tokens: u32,
         finished: bool,
         usage_value: Option<u32>,
     }
@@ -61,12 +70,19 @@ pin_project! {
 
 impl<S> ConverterStream<S> {
     /// 创建 Chunk 转换流
-    pub fn new(inner: S, model: String, include_usage: bool, include_obfuscation: bool) -> Self {
+    pub fn new(
+        inner: S,
+        model: String,
+        include_usage: bool,
+        include_obfuscation: bool,
+        prompt_tokens: u32,
+    ) -> Self {
         Self {
             inner,
             model,
             include_usage,
             include_obfuscation,
+            prompt_tokens,
             finished: false,
             usage_value: None,
         }
@@ -87,21 +103,16 @@ where
             && *this.include_usage
             && let Some(u) = this.usage_value.take()
         {
-            let usage = Usage {
-                prompt_tokens: 0,
-                completion_tokens: u,
-                total_tokens: u,
-                prompt_tokens_details: None,
-                completion_tokens_details: None,
-            };
-            return Poll::Ready(Some(Ok(make_usage_chunk(usage, this.model))));
+            return Poll::Ready(Some(Ok(make_usage_chunk(
+                make_usage(*this.prompt_tokens, u),
+                this.model,
+            ))));
         }
 
         loop {
             match this.inner.as_mut().poll_next(cx) {
                 Poll::Ready(Some(Ok(frame))) => match frame {
                     DsFrame::Role => {
-                        debug!(target: "adapter", "converter 生成 role chunk");
                         return Poll::Ready(Some(Ok(make_chunk(
                             this.model,
                             Delta {
@@ -132,7 +143,6 @@ where
                         ))));
                     }
                     DsFrame::Status(status) if status == "FINISHED" && !*this.finished => {
-                        debug!(target: "adapter", "converter 收到 FINISHED 状态");
                         *this.finished = true;
                         return Poll::Ready(Some(Ok(make_chunk(
                             this.model,
@@ -145,19 +155,12 @@ where
                         *this.usage_value = Some(u);
                         if *this.finished && *this.include_usage {
                             return Poll::Ready(Some(Ok(make_usage_chunk(
-                                Usage {
-                                    prompt_tokens: 0,
-                                    completion_tokens: u,
-                                    total_tokens: u,
-                                    prompt_tokens_details: None,
-                                    completion_tokens_details: None,
-                                },
+                                make_usage(*this.prompt_tokens, u),
                                 this.model,
                             ))));
                         }
                     }
                     DsFrame::Finish if !*this.finished => {
-                        debug!(target: "adapter", "converter 收到 finish 事件");
                         *this.finished = true;
                         return Poll::Ready(Some(Ok(make_chunk(
                             this.model,
@@ -173,14 +176,10 @@ where
                         && *this.include_usage
                         && let Some(u) = this.usage_value.take()
                     {
-                        let usage = Usage {
-                            prompt_tokens: 0,
-                            completion_tokens: u,
-                            total_tokens: u,
-                            prompt_tokens_details: None,
-                            completion_tokens_details: None,
-                        };
-                        return Poll::Ready(Some(Ok(make_usage_chunk(usage, this.model))));
+                        return Poll::Ready(Some(Ok(make_usage_chunk(
+                            make_usage(*this.prompt_tokens, u),
+                            this.model,
+                        ))));
                     }
                     return Poll::Ready(None);
                 }
@@ -204,7 +203,7 @@ mod tests {
             Ok(DsFrame::Role),
             Ok(DsFrame::ContentDelta("hello".into())),
         ]);
-        let mut conv = ConverterStream::new(frames, "deepseek-default".into(), false, false);
+        let mut conv = ConverterStream::new(frames, "deepseek-default".into(), false, false, 0);
         let chunk1 = conv.next().await.unwrap().unwrap();
         assert_eq!(chunk1.choices[0].delta.role, Some("assistant"));
         let chunk2 = conv.next().await.unwrap().unwrap();

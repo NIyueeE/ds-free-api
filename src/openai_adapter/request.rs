@@ -26,6 +26,7 @@ pub struct AdapterRequest {
     pub include_usage: bool,
     pub include_obfuscation: bool,
     pub stop: Vec<String>,
+    pub prompt_tokens: u32,
 }
 
 /// 解析 JSON 请求体，执行校验、默认值收敛和能力标志解析
@@ -50,6 +51,10 @@ pub fn parse(
     )
     .map_err(OpenAIAdapterError::BadRequest)?;
 
+    let prompt_tokens = tiktoken_rs::cl100k_base()
+        .map(|bpe| bpe.encode_with_special_tokens(&prompt).len() as u32)
+        .unwrap_or(0);
+
     debug!(target: "adapter", "模型解析结果: thinking={}, search={}", model_res.thinking_enabled, model_res.search_enabled);
 
     Ok(AdapterRequest {
@@ -64,6 +69,7 @@ pub fn parse(
         include_usage: norm.include_usage,
         include_obfuscation: norm.include_obfuscation,
         stop: norm.stop,
+        prompt_tokens,
     })
 }
 
@@ -270,6 +276,17 @@ mod tests {
                 effort
             );
         }
+
+        // 未提供 reasoning_effort 时默认开启 reasoning
+        let body = serde_json::json!({
+            "model": "deepseek-default",
+            "messages": [{ "role": "user", "content": "hi" }]
+        });
+        let req = parse_json(body).unwrap();
+        assert!(
+            req.ds_req.thinking_enabled,
+            "reasoning_effort absent should default to high"
+        );
     }
 
     #[test]

@@ -6,7 +6,7 @@
 
 [中文](README.md)
 
-Reverse proxy and adapter for free DeepSeek web chat endpoints to standard OpenAI-compatible API protocol (currently only openai_chat_completions, more to come).
+Reverse proxy and adapter for free DeepSeek web chat endpoints to standard OpenAI-compatible API protocol (currently supports openai_chat_completions, including streaming and tool calls).
 
 Cross-platform native Rust binary + single TOML config file.
 
@@ -60,12 +60,23 @@ area_code = ""
 password = "pass1"
 ```
 
+Here's a free test account — please don't send sensitive info through it (the program deletes sessions on cleanup, but leftovers may persist).
+
+```text
+rivigol378@tatefarm.com
+test12345
+```
+
+If you want multiple accounts for concurrency, look into temporary email services (some may not work) and use a VPN to register on the international version.
+
+Recommended temp-mail site: [temp-mail.org](https://temp-mail.org/en/10minutemail)
+
 ## API Endpoints
 
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/` | Health check |
-| POST | `/v1/chat/completions` | Chat completions |
+| POST | `/v1/chat/completions` | Chat completions (streaming and tool calls supported) |
 | GET | `/v1/models` | List models |
 | GET | `/v1/models/{id}` | Get model |
 
@@ -78,16 +89,18 @@ password = "pass1"
 | `deepseek-default` | Default mode |
 | `deepseek-expert` | Expert mode |
 
-Enable **reasoning**: add `"reasoning_effort": "high"` to the request body. See [Create chat completion | OpenAI API Reference](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create). Any value other than `"none"` enables it.
+### Capability Toggles
 
-Enable **web search**: add `"web_search_options": {"search_context_size": "high"}`. (May not be very useful — the model often forgets it has search capability.)
+- **Reasoning**: Enabled by default. To disable, add `"reasoning_effort": "none"` to the request body.
+- **Web search**: Disabled by default. To enable, add `"web_search_options": {"search_context_size": "high"}`.
+- **Tool calls**: Pass standard OpenAI `tools` and `tool_choice` fields. When the model decides to call a tool, the returned `finish_reason` will be `tool_calls`.
 
 ## Development
 
 Requires Rust 1.94.1+ (see `rust-toolchain.toml`).
 
 ```bash
-# Check (check + clippy + fmt)
+# One-pass check (check + clippy + fmt + audit + unused deps)
 just check
 
 # Run tests
@@ -99,6 +112,12 @@ just serve
 # CLI examples
 just ds-core-cli
 just openai-adapter-cli
+
+# Python e2e tests (requires server running on port 5317)
+just e2e
+
+# Start server with e2e test config
+just e2e-serve
 ```
 
 Architecture overview:

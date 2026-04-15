@@ -1,0 +1,13 @@
+[server]
+host = "127.0.0.1"
+port = 5317
+
+[[server.api_tokens]]
+token = "sk-test"
+description = "开发测试"
+
+[[accounts]]
+email = "rivigol378@tatefarm.com"
+mobile = ""
+area_code = ""
+password = "test12345"

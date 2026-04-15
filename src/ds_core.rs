@@ -60,9 +60,15 @@ impl DeepSeekCore {
         let wasm_bytes = client.get_wasm().await?;
         let solver = PowSolver::new(&wasm_bytes)?;
 
-        let mut pool =
-            AccountPool::new(config.accounts.clone(), config.deepseek.model_types.clone());
-        pool.init(&client, &solver).await.map_err(|e| match e {
+        let mut pool = AccountPool::new();
+        pool.init(
+            config.accounts.clone(),
+            config.deepseek.model_types.clone(),
+            &client,
+            &solver,
+        )
+        .await
+        .map_err(|e| match e {
             accounts::PoolError::AllAccountsFailed => {
                 CoreError::ProviderError("所有账号初始化失败".to_string())
             }

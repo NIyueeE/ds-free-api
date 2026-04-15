@@ -24,6 +24,10 @@ jobs:
         run: cargo clippy -- -D warnings
       - name: cargo fmt
         run: cargo fmt --check
+      - name: cargo audit
+        uses: actions-rust-lang/audit@v1
+      - name: cargo machete
+        run: cargo install cargo-machete --locked && cargo machete
 
   test:
     runs-on: ubuntu-latest

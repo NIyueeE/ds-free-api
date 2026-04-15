@@ -16,6 +16,7 @@ use bytes::Bytes;
 use futures::{Stream, StreamExt};
 use log::debug;
 use pin_project_lite::pin_project;
+use rand::RngExt;
 
 use crate::openai_adapter::{
     OpenAIAdapterError, StreamResponse,
@@ -46,7 +47,8 @@ fn random_padding(len: usize) -> String {
         return String::new();
     }
     let byte_len = (len * 3).div_ceil(4);
-    let bytes: Vec<u8> = (0..byte_len).map(|_| rand::random()).collect();
+    let mut bytes = vec![0u8; byte_len];
+    rand::rng().fill(&mut bytes);
     let s = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &bytes);
     s[..len].to_string()
 }
@@ -150,12 +152,13 @@ where
 }
 
 /// 流式响应：把 ds_core 字节流转换为 OpenAI SSE 字节流
-pub fn stream<S>(
+pub(crate) fn stream<S>(
     ds_stream: S,
     model: String,
     include_usage: bool,
     include_obfuscation: bool,
     stop: Vec<String>,
+    prompt_tokens: u32,
 ) -> StreamResponse
 where
     S: Stream<Item = Result<Bytes, crate::ds_core::CoreError>> + Send + 'static,
@@ -172,6 +175,7 @@ where
         model.clone(),
         include_usage,
         include_obfuscation,
+        prompt_tokens,
     );
     let tool_parsed = tool_parser::ToolCallStream::new(converted, model);
     let stop_stream = StopStream {
@@ -186,10 +190,11 @@ where
 }
 
 /// 非流式响应：聚合 SSE 流为单个 ChatCompletion JSON
-pub async fn aggregate<S>(
+pub(crate) async fn aggregate<S>(
     ds_stream: S,
     model: String,
     stop: Vec<String>,
+    prompt_tokens: u32,
 ) -> Result<Vec<u8>, OpenAIAdapterError>
 where
     S: Stream<Item = Result<Bytes, crate::ds_core::CoreError>> + Send,
@@ -197,7 +202,8 @@ where
     debug!(target: "adapter", "构建非流式响应: model={}, stop_count={}", model, stop.len());
     let sse = sse_parser::SseStream::new(ds_stream);
     let state_stream = state::StateStream::new(sse);
-    let converted = converter::ConverterStream::new(state_stream, model.clone(), true, false);
+    let converted =
+        converter::ConverterStream::new(state_stream, model.clone(), true, false, prompt_tokens);
 
     let mut content = String::new();
     let mut reasoning = String::new();
@@ -324,7 +330,7 @@ mod tests {
             data: {\"p\":\"response/status\",\"v\":\"FINISHED\"}\n\n\
             event: finish\ndata: {}\n\n";
         let stream = futures::stream::iter(vec![sse_bytes(fixture)]);
-        let json = aggregate(stream, "deepseek-default".into(), vec![])
+        let json = aggregate(stream, "deepseek-default".into(), vec![], 0)
             .await
             .unwrap();
         let completion: serde_json::Value = serde_json::from_slice(&json).unwrap();
@@ -351,7 +357,7 @@ mod tests {
             data: {\"p\":\"response/fragments/-1/content\",\"o\":\"APPEND\",\"v\":\"answer\"}\n\n\
             event: finish\ndata: {}\n\n";
         let stream = futures::stream::iter(vec![sse_bytes(fixture)]);
-        let json = aggregate(stream, "deepseek-expert".into(), vec![])
+        let json = aggregate(stream, "deepseek-expert".into(), vec![], 0)
             .await
             .unwrap();
         let completion: serde_json::Value = serde_json::from_slice(&json).unwrap();
@@ -373,7 +379,7 @@ mod tests {
             data: {\"p\":\"response/fragments/-1/content\",\"o\":\"APPEND\",\"v\":\"<tool_calls>[{\\\"name\\\": \\\"get_weather\\\", \\\"arguments\\\": {\\\"city\\\": \\\"beijing\\\"}}]</tool_calls>\"}\n\n\
             event: finish\ndata: {}\n\n";
         let stream = futures::stream::iter(vec![sse_bytes(fixture)]);
-        let json = aggregate(stream, "deepseek-default".into(), vec![])
+        let json = aggregate(stream, "deepseek-default".into(), vec![], 0)
             .await
             .unwrap();
         let completion: serde_json::Value = serde_json::from_slice(&json).unwrap();
@@ -398,7 +404,7 @@ mod tests {
             data: {\"p\":\"response/fragments/-1/content\",\"o\":\"APPEND\",\"v\":\"<tool_calls>[{\\\"name\\\": \\\"get_weather\\\", \\\"arguments\\\": {}}]</tool_calls> trailing text\"}\n\n\
             event: finish\ndata: {}\n\n";
         let stream = futures::stream::iter(vec![sse_bytes(fixture)]);
-        let json = aggregate(stream, "deepseek-default".into(), vec![])
+        let json = aggregate(stream, "deepseek-default".into(), vec![], 0)
             .await
             .unwrap();
         let completion: serde_json::Value = serde_json::from_slice(&json).unwrap();
@@ -448,6 +454,7 @@ mod tests {
             false,
             false,
             vec![],
+            0,
         ))
         .await;
         println!("\n=== STREAM CHUNKS (plain_text) ===");
@@ -481,8 +488,15 @@ mod tests {
             data: {\"p\":\"response/status\",\"v\":\"FINISHED\"}\n\n\
             event: finish\ndata: {}\n\n";
         let bytes_stream = futures::stream::iter(vec![sse_bytes(fixture)]);
-        let chunks =
-            collect_chunks(super::stream(bytes_stream, "m".into(), true, false, vec![])).await;
+        let chunks = collect_chunks(super::stream(
+            bytes_stream,
+            "m".into(),
+            true,
+            false,
+            vec![],
+            0,
+        ))
+        .await;
         println!("\n=== STREAM CHUNKS (include_usage) ===");
         for (i, c) in chunks.iter().enumerate() {
             println!("chunk[{i}]:\n{}", serde_json::to_string_pretty(c).unwrap());
@@ -523,6 +537,7 @@ mod tests {
             false,
             false,
             vec![],
+            0,
         ))
         .await;
         println!("\n=== STREAM CHUNKS (tool_calls) ===");
@@ -570,6 +585,7 @@ mod tests {
             false,
             false,
             vec![],
+            0,
         ))
         .await;
         println!("\n=== STREAM CHUNKS (fragmented_tool_calls_with_thinking) ===");
@@ -626,6 +642,7 @@ mod tests {
             false,
             false,
             vec![],
+            0,
         ))
         .await;
         println!("\n=== STREAM CHUNKS (tool_search_and_open) ===");
@@ -664,8 +681,15 @@ mod tests {
             data: {\"p\":\"response/status\",\"v\":\"FINISHED\"}\n\n\
             event: finish\ndata: {}\n\n";
         let bytes_stream = futures::stream::iter(vec![sse_bytes(fixture)]);
-        let chunks =
-            collect_chunks(super::stream(bytes_stream, "m".into(), false, true, vec![])).await;
+        let chunks = collect_chunks(super::stream(
+            bytes_stream,
+            "m".into(),
+            false,
+            true,
+            vec![],
+            0,
+        ))
+        .await;
         println!("\n=== STREAM CHUNKS (include_obfuscation) ===");
         for (i, c) in chunks.iter().enumerate() {
             println!(
@@ -717,7 +741,7 @@ mod tests {
             data: {\"p\":\"response/fragments/-1/content\",\"o\":\"APPEND\",\"v\":\"<tool_calls>[{\\\"name\\\": \\\"get_weather\\\", \\\"arguments\\\": {\\\"city\\\": \\\"beijing\\\"}}]</tool_calls>\"}\n\n\
             event: finish\ndata: {}\n\n";
         let stream = futures::stream::iter(vec![sse_bytes(fixture)]);
-        let json = aggregate(stream, "deepseek-default".into(), vec![])
+        let json = aggregate(stream, "deepseek-default".into(), vec![], 0)
             .await
             .unwrap();
         let completion: serde_json::Value = serde_json::from_slice(&json).unwrap();
@@ -755,6 +779,7 @@ mod tests {
             false,
             false,
             vec![],
+            0,
         ))
         .await;
         println!("\n=== STREAM CHUNKS (tool_calls with leading text, fragmented) ===");
@@ -816,6 +841,7 @@ mod tests {
             false,
             false,
             vec![],
+            0,
         ))
         .await;
         println!("\n=== STREAM CHUNKS (leading text + multi-chunk JSON fragments) ===");
@@ -862,6 +888,7 @@ mod tests {
             false,
             false,
             vec![],
+            0,
         ))
         .await;
         println!("\n=== STREAM CHUNKS (thinking + leading + fragmented JSON) ===");
@@ -909,6 +936,7 @@ mod tests {
             false,
             false,
             vec![],
+            0,
         ))
         .await;
         println!("\n=== STREAM CHUNKS (JSON split right after tool_call) ===");
@@ -939,6 +967,7 @@ mod tests {
             false,
             false,
             vec![],
+            0,
         ))
         .await;
         println!("\n=== STREAM CHUNKS (tool_calls, no leading text) ===");
