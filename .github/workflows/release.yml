@@ -1,8 +1,9 @@
 name: Release
 
 on:
-  release:
-    types: [published]
+  push:
+    tags:
+      - 'v*'
   workflow_dispatch:
     inputs:
       tag:
@@ -25,6 +26,14 @@ jobs:
             suffix: linux-aarch64-gnu
     steps:
       - uses: actions/checkout@v4
+      - name: Resolve tag
+        id: meta
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "tag=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          fi
       - name: Install Rust
         uses: dtolnay/rust-toolchain@master
         with:
@@ -42,7 +51,7 @@ jobs:
         run: cross build --release --target ${{ matrix.target }}
       - name: Package
         run: |
-          name="ds-free-api-${{ github.ref_name }}-${{ matrix.suffix }}"
+          name="ds-free-api-${{ steps.meta.outputs.tag }}-${{ matrix.suffix }}"
           mkdir -p "$name"
           cp "target/${{ matrix.target }}/release/ds-free-api" "$name/"
           cp LICENSE README.md README.en.md config.example.toml "$name/"
@@ -65,6 +74,14 @@ jobs:
             suffix: linux-aarch64-musl
     steps:
       - uses: actions/checkout@v4
+      - name: Resolve tag
+        id: meta
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "tag=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          fi
       - name: Install Rust
         uses: dtolnay/rust-toolchain@master
         with:
@@ -82,7 +99,7 @@ jobs:
         run: cross build --release --target ${{ matrix.target }}
       - name: Package
         run: |
-          name="ds-free-api-${{ github.ref_name }}-${{ matrix.suffix }}"
+          name="ds-free-api-${{ steps.meta.outputs.tag }}-${{ matrix.suffix }}"
           mkdir -p "$name"
           cp "target/${{ matrix.target }}/release/ds-free-api" "$name/"
           cp LICENSE README.md README.en.md config.example.toml "$name/"
@@ -105,6 +122,14 @@ jobs:
             suffix: macos-aarch64
     steps:
       - uses: actions/checkout@v4
+      - name: Resolve tag
+        id: meta
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "tag=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          fi
       - name: Install Rust
         uses: dtolnay/rust-toolchain@master
         with:
@@ -118,7 +143,7 @@ jobs:
         run: cargo build --release --target ${{ matrix.target }}
       - name: Package
         run: |
-          name="ds-free-api-${{ github.ref_name }}-${{ matrix.suffix }}"
+          name="ds-free-api-${{ steps.meta.outputs.tag }}-${{ matrix.suffix }}"
           mkdir -p "$name"
           cp "target/${{ matrix.target }}/release/ds-free-api" "$name/"
           cp LICENSE README.md README.en.md config.example.toml "$name/"
@@ -141,6 +166,15 @@ jobs:
             suffix: windows-aarch64
     steps:
       - uses: actions/checkout@v4
+      - name: Resolve tag
+        id: meta
+        shell: pwsh
+        run: |
+          if ("${{ github.event_name }}" -eq "workflow_dispatch") {
+            "tag=${{ github.event.inputs.tag }}" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          } else {
+            "tag=${{ github.ref_name }}" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          }
       - name: Install Rust
         uses: dtolnay/rust-toolchain@master
         with:
@@ -155,7 +189,7 @@ jobs:
       - name: Package
         shell: pwsh
         run: |
-          $name = "ds-free-api-${{ github.ref_name }}-${{ matrix.suffix }}"
+          $name = "ds-free-api-${{ steps.meta.outputs.tag }}-${{ matrix.suffix }}"
           New-Item -ItemType Directory -Force -Path $name
           Copy-Item "target/${{ matrix.target }}/release/ds-free-api.exe" "$name/"
           Copy-Item LICENSE, README.md, README.en.md, config.example.toml "$name/"
@@ -174,23 +208,57 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
+      - name: Resolve tag
+        id: meta
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "tag=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Verify version matches Cargo.toml
+        run: |
+          CARGO_VERSION=$(grep '^version =' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          TAG="${{ steps.meta.outputs.tag }}"
+          TAG_VERSION="${TAG#v}"
+          if [ "$CARGO_VERSION" != "$TAG_VERSION" ]; then
+            echo "Mismatch: Cargo.toml version=$CARGO_VERSION, tag=$TAG_VERSION"
+            exit 1
+          fi
+
+      - name: Extract changelog
+        run: |
+          TAG="${{ steps.meta.outputs.tag }}"
+          VERSION="${TAG#v}"
+          awk "/## \[$VERSION\]/{flag=1;next}/## \[/{flag=0}flag" CHANGELOG.md > release_notes.md
+          if [ ! -s release_notes.md ]; then
+            echo "No changelog entry found for $VERSION"
+            exit 1
+          fi
+
       - name: Download artifacts
         uses: actions/download-artifact@v4
         with:
           path: dist
+
       - name: Flatten structure
         run: |
           find dist -mindepth 2 -type f -exec mv -t dist/ {} +
           find dist -mindepth 1 -type d -empty -delete
+
       - name: Generate checksums
         run: |
           cd dist
           sha256sum *.tar.gz *.zip > ../SHA256SUMS
           mv ../SHA256SUMS .
+
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
           files: dist/*
-          generate_release_notes: true
+          generate_release_notes: false
+          body_path: release_notes.md
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
