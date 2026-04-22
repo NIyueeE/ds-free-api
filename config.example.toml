@@ -47,3 +47,5 @@ password = "pass3"
 # 支持的模型类型列表，默认值为 ["default", "expert"]
 # 每种类型会自动映射为 OpenAI 的 model_id：deepseek-<type>
 # model_types = ["default", "expert"]
+# max_input_tokens = [128000, 1000000]
+# max_output_tokens = [16384, 16384]

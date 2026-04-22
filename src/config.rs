@@ -52,6 +52,12 @@ pub struct DeepSeekConfig {
     /// 定义支持的模型类型列表，每种类型会自动映射为 OpenAI 的 model_id：deepseek-<type>
     #[serde(default = "default_model_types")]
     pub model_types: Vec<String>,
+    /// 各模型类型的输入 token 限制（与 model_types 按索引一一对应）
+    #[serde(default = "default_max_input_tokens")]
+    pub max_input_tokens: Vec<u32>,
+    /// 各模型类型的输出 token 限制（与 model_types 按索引一一对应）
+    #[serde(default = "default_max_output_tokens")]
+    pub max_output_tokens: Vec<u32>,
 }
 
 impl Default for DeepSeekConfig {
@@ -63,12 +69,22 @@ impl Default for DeepSeekConfig {
             client_version: default_client_version(),
             client_platform: default_client_platform(),
             model_types: default_model_types(),
+            max_input_tokens: default_max_input_tokens(),
+            max_output_tokens: default_max_output_tokens(),
         }
     }
 }
 
 fn default_model_types() -> Vec<String> {
     vec!["default".to_string(), "expert".to_string()]
+}
+
+fn default_max_input_tokens() -> Vec<u32> {
+    vec![128_000, 1_000_000]
+}
+
+fn default_max_output_tokens() -> Vec<u32> {
+    vec![16_384, 16_384]
 }
 
 impl DeepSeekConfig {
@@ -169,6 +185,21 @@ impl Config {
         }
         if self.deepseek.model_types.is_empty() {
             return Err(ConfigError::Validation("model_types 不能为空".to_string()));
+        }
+        let n = self.deepseek.model_types.len();
+        if self.deepseek.max_input_tokens.len() != n {
+            return Err(ConfigError::Validation(format!(
+                "max_input_tokens 长度({})必须与 model_types 长度({})一致",
+                self.deepseek.max_input_tokens.len(),
+                n
+            )));
+        }
+        if self.deepseek.max_output_tokens.len() != n {
+            return Err(ConfigError::Validation(format!(
+                "max_output_tokens 长度({})必须与 model_types 长度({})一致",
+                self.deepseek.max_output_tokens.len(),
+                n
+            )));
         }
         Ok(())
     }

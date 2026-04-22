@@ -1,6 +1,6 @@
-//! HTTP 服务器层 —— 薄路由壳，暴露 OpenAIAdapter 为 HTTP 接口
+//! HTTP 服务器层 —— 薄路由壳，暴露 OpenAIAdapter 与 AnthropicCompat 为 HTTP 接口
 //!
-//! 本模块负责将 OpenAIAdapter 包装为 axum HTTP 服务。
+//! 本模块负责将 adapter / compat 层包装为 axum HTTP 服务。
 
 mod error;
 mod handlers;
@@ -16,6 +16,7 @@ use axum::{
 use std::sync::Arc;
 use tokio::net::TcpListener;
 
+use crate::anthropic_compat::AnthropicCompat;
 use crate::config::Config;
 use crate::openai_adapter::OpenAIAdapter;
 
@@ -23,9 +24,11 @@ use handlers::AppState;
 
 /// 启动 HTTP 服务器
 pub async fn run(config: Config) -> anyhow::Result<()> {
-    let adapter = OpenAIAdapter::new(&config).await?;
+    let adapter = Arc::new(OpenAIAdapter::new(&config).await?);
+    let anthropic_compat = Arc::new(AnthropicCompat::new(Arc::clone(&adapter)));
     let state = AppState {
-        adapter: Arc::new(adapter),
+        adapter,
+        anthropic_compat,
     };
     let router = build_router(state.clone(), &config.server.api_tokens);
 
@@ -51,9 +54,17 @@ fn build_router(state: AppState, api_tokens: &[crate::config::ApiToken]) -> Rout
 
     let mut router = Router::new()
         .route("/", get(|| async { "ai-free-api" }))
+        // OpenAI
         .route("/v1/chat/completions", post(handlers::chat_completions))
         .route("/v1/models", get(handlers::list_models))
         .route("/v1/models/{id}", get(handlers::get_model))
+        // Anthropic
+        .route("/anthropic/v1/messages", post(handlers::anthropic_messages))
+        .route("/anthropic/v1/models", get(handlers::anthropic_list_models))
+        .route(
+            "/anthropic/v1/models/{id}",
+            get(handlers::anthropic_get_model),
+        )
         .with_state(state);
 
     if has_auth {

@@ -8,14 +8,30 @@ const MODEL_CREATED: u64 = 1_090_108_800;
 const MODEL_OWNED_BY: &str = "deepseek-web (proxied by https://github.com/NIyueeE)";
 
 /// 根据 model_types 生成模型列表 JSON
-pub fn list(model_types: &[String]) -> Vec<u8> {
+pub fn list(
+    model_types: &[String],
+    max_input_tokens: &[u32],
+    max_output_tokens: &[u32],
+) -> Vec<u8> {
     let data: Vec<Model> = model_types
         .iter()
-        .map(|ty| Model {
-            id: format!("deepseek-{}", ty),
-            object: "model",
-            created: MODEL_CREATED,
-            owned_by: MODEL_OWNED_BY,
+        .enumerate()
+        .map(|(idx, ty)| {
+            let input = max_input_tokens.get(idx).copied();
+            let output = max_output_tokens.get(idx).copied();
+            Model {
+                id: format!("deepseek-{}", ty),
+                object: "model",
+                created: MODEL_CREATED,
+                owned_by: MODEL_OWNED_BY,
+                max_input_tokens: input,
+                max_output_tokens: output,
+                context_length: input,
+                context_window: input,
+                max_context_length: input,
+                max_tokens: output,
+                max_completion_tokens: output,
+            }
         })
         .collect();
 
@@ -27,17 +43,32 @@ pub fn list(model_types: &[String]) -> Vec<u8> {
 }
 
 /// 查询单个模型
-pub fn get(model_types: &[String], id: &str) -> Option<Vec<u8>> {
+pub fn get(
+    model_types: &[String],
+    max_input_tokens: &[u32],
+    max_output_tokens: &[u32],
+    id: &str,
+) -> Option<Vec<u8>> {
     let target = id.to_lowercase();
     model_types
         .iter()
-        .find(|ty| format!("deepseek-{}", ty).to_lowercase() == target)
-        .map(|ty| {
+        .enumerate()
+        .find(|(_, ty)| format!("deepseek-{}", ty).to_lowercase() == target)
+        .map(|(idx, ty)| {
+            let input = max_input_tokens.get(idx).copied();
+            let output = max_output_tokens.get(idx).copied();
             serde_json::to_vec(&Model {
                 id: format!("deepseek-{}", ty),
                 object: "model",
                 created: MODEL_CREATED,
                 owned_by: MODEL_OWNED_BY,
+                max_input_tokens: input,
+                max_output_tokens: output,
+                context_length: input,
+                context_window: input,
+                max_context_length: input,
+                max_tokens: output,
+                max_completion_tokens: output,
             })
             .unwrap_or_else(|_| br#"{}"#.to_vec())
         })

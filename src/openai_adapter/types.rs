@@ -496,6 +496,27 @@ pub struct Model {
     pub object: &'static str,
     pub created: u64,
     pub owned_by: &'static str,
+    /// 输入 token 上限（主字段）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_input_tokens: Option<u32>,
+    /// 输出 token 上限（主字段）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens: Option<u32>,
+    /// 兼容字段：同 max_input_tokens
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_length: Option<u32>,
+    /// 兼容字段：同 max_input_tokens
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<u32>,
+    /// 兼容字段：同 max_input_tokens
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_context_length: Option<u32>,
+    /// 兼容字段：同 max_output_tokens
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u32>,
+    /// 兼容字段：同 max_output_tokens
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_completion_tokens: Option<u32>,
 }
 
 /// 模型列表响应

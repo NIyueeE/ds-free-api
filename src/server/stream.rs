@@ -1,30 +1,37 @@
-//! SSE 流桥接 —— StreamResponse 转 axum Body
+//! SSE 流桥接 —— 泛型 Stream 转 axum Body
 //!
-//! StreamResponse 已输出 SSE 格式字节，直接管道输出即可。
+//! 支持 OpenAI 与 Anthropic 两种流式响应。
 
 use axum::{
     body::Body,
     http::{StatusCode, header},
     response::{IntoResponse, Response},
 };
+use bytes::Bytes;
+use futures::Stream;
 use futures::StreamExt;
 
-use crate::openai_adapter::StreamResponse;
-
-/// SSE 响应体包装器
-pub struct SseBody {
-    inner: StreamResponse,
+/// SSE 响应体包装器（泛型）
+pub struct SseBody<S> {
+    inner: S,
 }
 
-impl SseBody {
-    pub fn new(stream: StreamResponse) -> Self {
+impl<S, E> SseBody<S>
+where
+    S: Stream<Item = Result<Bytes, E>> + Send + 'static,
+    E: std::fmt::Display + Send + Sync + 'static,
+{
+    pub fn new(stream: S) -> Self {
         Self { inner: stream }
     }
 }
 
-impl IntoResponse for SseBody {
+impl<S, E> IntoResponse for SseBody<S>
+where
+    S: Stream<Item = Result<Bytes, E>> + Send + 'static,
+    E: std::fmt::Display + Send + Sync + 'static,
+{
     fn into_response(self) -> Response {
-        // StreamResponse 已经输出 SSE 格式的字节，直接转换为 axum Body
         let body = Body::from_stream(self.inner.map(|result| {
             result.map_err(|e| {
                 log::error!(target: "http::response", "SSE stream error: {}", e);

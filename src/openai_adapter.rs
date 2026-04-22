@@ -24,6 +24,8 @@ pub struct OpenAIAdapter {
     ds_core: DeepSeekCore,
     model_types: Vec<String>,
     model_registry: std::collections::HashMap<String, String>,
+    max_input_tokens: Vec<u32>,
+    max_output_tokens: Vec<u32>,
 }
 
 impl OpenAIAdapter {
@@ -35,6 +37,8 @@ impl OpenAIAdapter {
             ds_core,
             model_types: config.deepseek.model_types.clone(),
             model_registry,
+            max_input_tokens: config.deepseek.max_input_tokens.clone(),
+            max_output_tokens: config.deepseek.max_output_tokens.clone(),
         })
     }
 
@@ -94,12 +98,21 @@ impl OpenAIAdapter {
 
     /// GET /v1/models
     pub fn list_models(&self) -> Vec<u8> {
-        models::list(&self.model_types)
+        models::list(
+            &self.model_types,
+            &self.max_input_tokens,
+            &self.max_output_tokens,
+        )
     }
 
     /// GET /v1/models/{model_id}
     pub fn get_model(&self, model_id: &str) -> Option<Vec<u8>> {
-        models::get(&self.model_types, model_id)
+        models::get(
+            &self.model_types,
+            &self.max_input_tokens,
+            &self.max_output_tokens,
+            model_id,
+        )
     }
 
     /// 获取 ds_core 账号池状态

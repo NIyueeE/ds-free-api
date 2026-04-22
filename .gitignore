@@ -2,7 +2,7 @@ target/
 
 # python uv 测试环境
 py-e2e-tests/.venv
-py-e2e-tests/__pycache__
+**/__pycache__
 py-e2e-tests/*.egg-info
 py-e2e-tests/.pytest_cache
 py-e2e-tests/uv.lock
