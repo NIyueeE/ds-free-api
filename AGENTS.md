@@ -130,6 +130,11 @@ ds_core SSE bytes → SseStream (sse_parser) → StateStream (state/patch machin
 
 All stream wrappers use `pin_project_lite::pin_project!` macro and implement the `Stream` trait with `poll_next`.
 
+### Capability Toggles
+The adapter maps OpenAI request fields to DeepSeek internal flags in `request/resolver.rs`:
+- **Reasoning**: `reasoning_effort` defaults to `"high"` if absent (reasoning is on by default). Explicitly set to `"none"` to disable.
+- **Web search**: `web_search_options` enables search when present; omitted by default (search off).
+
 ### Anthropic Compatibility Layer
 The Anthropic compat layer (`anthropic_compat/`) is a **pure protocol translator** that sits on top of `openai_adapter`:
 - Does NOT directly access `ds_core` — all data flows through `OpenAIAdapter`
@@ -215,15 +220,21 @@ Optional Bearer token auth via `[[server.api_tokens]]` in config; no auth when e
 - **Comments**: Chinese in source files (team preference)
 - **Errors**: Chinese error messages for user-facing output
 - **Logging**: `log` crate with explicit targets. Untargeted logs (e.g., bare `log::info!`) are prohibited. Targets used:
-  - `ds_core::accounts`, `ds_core::client`, `ds_core::completions`, `ds_core::pow`
+  - `ds_core::accounts`, `ds_core::client`
   - `adapter` (for `openai_adapter`)
   - `http::server`, `http::request`, `http::response` (for `server`)
-  - `anthropic_compat`, `anthropic_compat::request`, `anthropic_compat::response::stream`, `anthropic_compat::response::aggregate`
+  - `anthropic_compat`, `anthropic_compat::models`, `anthropic_compat::request`, `anthropic_compat::response::stream`, `anthropic_compat::response::aggregate`
   - See `docs/logging-spec.md` for full target/level mapping
 - **Visibility**: `pub(crate)` for types not part of the public API; facade modules keep submodules private with `mod`
 - **Tests**: All tests are inline (`#[cfg(test)]` within `src/` files). `request.rs` has sync unit tests for parsing logic; `response.rs` has `tokio::test` async tests for stream aggregation. No separate `tests/` directory.
 - **Test output**: `println!` / `eprintln!` are allowed inside `#[cfg(test)]` blocks for debugging test failures; they remain prohibited in library code
 - **Import grouping**: std → third-party → `crate::` → local (`super`, `self`), separated by blank lines
+- **Comments**: Follow `docs/code-style.md`:
+  - `//!` — module docs: first line = responsibility, then key design decisions
+  - `///` — public API docs: verb-led, note side effects and panic conditions
+  - `//` — inline: explain "why", not "what"
+- **Naming**: `snake_case` for modules/functions, `PascalCase` for types/enum variants, `SCREAMING_SNAKE_CASE` for constants
+- **Test code**: `println!` / `eprintln!` are allowed inside `#[cfg(test)]` for debugging failures; prohibited in library code
 
 ## Anti-Patterns
 
@@ -259,7 +270,7 @@ just openai-adapter-cli
 just test-adapter-request
 just test-adapter-response
 
-# Run a single Rust test
+# Run a single Rust test (use -- --exact for precise name matching)
 cargo test converter_emits_role_and_content -- --exact
 
 # Run all Rust tests

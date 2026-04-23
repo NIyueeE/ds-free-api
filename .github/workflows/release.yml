@@ -25,7 +25,7 @@ jobs:
           - target: aarch64-unknown-linux-gnu
             suffix: linux-aarch64-gnu
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Resolve tag
         id: meta
         run: |
@@ -57,7 +57,7 @@ jobs:
           cp LICENSE README.md README.en.md config.example.toml "$name/"
           tar czf "$name.tar.gz" "$name"
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.suffix }}
           path: "*.tar.gz"
@@ -73,7 +73,7 @@ jobs:
           - target: aarch64-unknown-linux-musl
             suffix: linux-aarch64-musl
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Resolve tag
         id: meta
         run: |
@@ -105,7 +105,7 @@ jobs:
           cp LICENSE README.md README.en.md config.example.toml "$name/"
           tar czf "$name.tar.gz" "$name"
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.suffix }}
           path: "*.tar.gz"
@@ -121,7 +121,7 @@ jobs:
           - target: aarch64-apple-darwin
             suffix: macos-aarch64
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Resolve tag
         id: meta
         run: |
@@ -149,7 +149,7 @@ jobs:
           cp LICENSE README.md README.en.md config.example.toml "$name/"
           tar czf "$name.tar.gz" "$name"
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.suffix }}
           path: "*.tar.gz"
@@ -165,7 +165,7 @@ jobs:
           - target: aarch64-pc-windows-msvc
             suffix: windows-aarch64
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Resolve tag
         id: meta
         shell: pwsh
@@ -195,7 +195,7 @@ jobs:
           Copy-Item LICENSE, README.md, README.en.md, config.example.toml "$name/"
           Compress-Archive -Path $name -DestinationPath "$name.zip"
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.suffix }}
           path: "*.zip"
@@ -205,7 +205,7 @@ jobs:
     needs: [build-linux-gnu, build-linux-musl, build-macos, build-windows]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
@@ -239,7 +239,7 @@ jobs:
           fi
 
       - name: Download artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: dist
 
@@ -255,7 +255,7 @@ jobs:
           mv ../SHA256SUMS .
 
       - name: Create release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: dist/*
           generate_release_notes: false
