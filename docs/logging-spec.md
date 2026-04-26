@@ -10,11 +10,11 @@
 
 | 级别 | 使用场景 | 示例 |
 |------|----------|------|
-| `ERROR` | 需要人工介入的致命错误 | 所有账号初始化失败、PoW 模块崩溃、配置错误 |
-| `WARN` | 降级但可继续的异常 | 单个账号初始化失败（还有其他账号可用）、session 清理失败 |
-| `INFO` | 关键生命周期事件 | 账号初始化成功、服务启动/关闭、会话创建完成 |
-| `DEBUG` | 调试信息 | HTTP 请求/响应摘要、PoW 计算耗时、SSE 事件类型 |
-| `TRACE` | 最细粒度数据 | SSE 原始字节内容、完整 HTTP body |
+| `ERROR` | 需要人工介入的致命错误 | 所有账号初始化失败、PoW 计算崩溃、配置错误 |
+| `WARN` | 降级但可继续的异常 | 单个账号初始化失败、session 清理失败、限流、账号池耗尽、SSE 流中断、tool_parser 解析失败触发修复 |
+| `INFO` | 关键生命周期事件 | 账号初始化成功、服务启动/关闭 |
+| `DEBUG` | 调试信息 | HTTP 请求/响应摘要、账号分配、SSE 事件类型 |
+| `TRACE` | 最细粒度数据 | SSE 原始事件内容、Anthropic 转换细节 |
 
 ## Target 规范
 
@@ -22,11 +22,20 @@
 
 | 模块 | Target | 说明 |
 |------|--------|------|
-| `ds_core::accounts` | `ds_core::accounts` | 账号池生命周期、健康检查 |
+| `ds_core::accounts` | `ds_core::accounts` | 账号池生命周期、分配、健康检查、限流检测 |
 | `ds_core::client` | `ds_core::client` | HTTP 请求/响应、API 调用 |
-| `ds_core::completions` | `ds_core::completions` | 对话编排、SSE 流处理 |
-| `ds_core::pow` | `ds_core::pow` | PoW 计算、WASM 加载 |
-| `adapter` | `adapter` | OpenAI 协议适配层 |
+| `ds_core::completions` | `ds_core::accounts` | 对话编排、SSE 流处理、stop_stream（和 accounts 共用 target）|
+| `ds_core::pow` | `ds_core::accounts` | PoW 计算（和 accounts 共用 target）|
+| `openai_adapter` | `adapter` | OpenAI 协议适配层（请求解析、响应转换、SSE 解析、tool_parser）|
+| `anthropic_compat` | `anthropic_compat` | Anthropic 协议兼容层入口 |
+| `anthropic_compat::request` | `anthropic_compat::request` | Anthropic → OpenAI 请求映射 |
+| `anthropic_compat::models` | `anthropic_compat::models` | Anthropic 模型列表 |
+| `anthropic_compat::response::stream` | `anthropic_compat::response::stream` | Anthropic 流式响应转换 |
+| `anthropic_compat::response::aggregate` | `anthropic_compat::response::aggregate` | Anthropic 非流式响应聚合 |
+| `server` | `http::server` | 服务生命周期（启动、关闭信号）|
+| `server::handlers` | `http::request` / `http::response` | HTTP 请求摘要（路径、stream 标记）、响应摘要（状态码、字节数）|
+| `server::error` | `http::response` | HTTP 错误响应（状态码、错误消息）|
+| `server::stream` | `http::response` | SSE 流错误 |
 
 ## 代码规范
 
@@ -36,49 +45,75 @@
 use log::{info, debug, warn, error};
 
 // INFO: 关键生命周期
-info!(target: "ds_core::accounts", "账号 {} 初始化成功", mobile);
+info!(target: "ds_core::accounts", "账号 {} 初始化成功", display_id);
 
 // WARN: 单个失败可降级
-warn!(target: "ds_core::accounts", "账号 {} 初始化失败: {}", mobile, e);
+warn!(target: "ds_core::accounts", "账号 {} 初始化失败: {}", display_id, e);
 
-// DEBUG: HTTP 调试信息
-debug!(target: "ds_core::client", "PoW challenge: alg={} difficulty={}", alg, diff);
+// WARN: 限流 / 账号耗尽
+warn!(target: "ds_core::accounts", "req={} 账号池无可用账号: model_type={}", request_id, model_type);
 
-// ERROR: 致命错误
+// ERROR: 所有账号全部失败
 error!(target: "ds_core::accounts", "所有账号初始化失败");
+
+// DEBUG: PoW 调试信息
+debug!(target: "ds_core::accounts", "health_check model_type={}", model_type);
 ```
 
-### 应用层（examples/ / main.rs）
+### 响应转换层（openai_adapter/）
 
 ```rust
-fn main() {
-    // 默认 info 级别，可通过 RUST_LOG 覆盖
-    env_logger::Builder::from_env(
-        env_logger::Env::new().default_filter_or("info")
-    ).init();
-}
+use log::{debug, trace, warn};
+
+// TRACE: 原始 SSE 事件
+trace!(target: "adapter", "<<< {} {}", event, data);
+
+// WARN: SSE 流中断（上游连接异常）
+warn!(target: "adapter", "SSE 流错误: {}", e);
+
+// WARN: tool_parser 修复触发
+warn!(target: "adapter", "tool_parser 解析失败→请求修复");
+
+// DEBUG: 正常解析
+debug!(target: "adapter", "tool_parser 解析出 {} 个工具调用", count);
+```
+
+### 应用层（examples/ / main.rs / server/）
+
+```rust
+// DEBUG: HTTP 请求摘要（handler 入口）
+debug!(target: "http::request", "req={} POST /v1/chat/completions stream={}", req_id, stream);
+
+// DEBUG: HTTP 响应摘要（handler 出口）
+debug!(target: "http::response", "req={} 200 JSON response {} bytes", req_id, len);
+
+// ERROR: SSE 流错误（响应发送阶段）
+error!(target: "http::response", "SSE stream error: {}", e);
 ```
 
 ## 运行时控制
 
 ```bash
 # 默认级别（info）
-cargo run --example ds_core_cli
+just serve
 
 # 调试模式 - 查看所有 debug 日志
-RUST_LOG=debug cargo run --example ds_core_cli
+RUST_LOG=debug just serve
 
 # 模块级过滤 - 只看 accounts 的 debug
-RUST_LOG=ds_core::accounts=debug cargo run --example ds_core_cli
+RUST_LOG=ds_core::accounts=debug just serve
 
 # 多级组合 - accounts 用 debug，其他用 warn
-RUST_LOG=ds_core::accounts=debug,ds_core::client=warn,info cargo run --example ds_core_cli
+RUST_LOG=ds_core::accounts=debug,ds_core::client=warn,info just serve
 
 # 完全静默（仅错误）
-RUST_LOG=error cargo run --example ds_core_cli
+RUST_LOG=error just serve
 
 # 输出到文件
-RUST_LOG=debug cargo run --example ds_core_cli 2> ds_core.log
+RUST_LOG=debug just serve 2> server.log
+
+# 关注限流事件和请求跟踪
+RUST_LOG=ds_core::accounts=debug,adapter=warn just serve
 ```
 
 ## 禁止事项

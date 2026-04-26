@@ -13,7 +13,7 @@ use std::task::{Context, Poll};
 use futures::Stream;
 use pin_project_lite::pin_project;
 
-use log::debug;
+use log::{debug, warn};
 
 use crate::openai_adapter::OpenAIAdapterError;
 use crate::openai_adapter::types::{
@@ -346,7 +346,7 @@ where
                                             }
                                             *this.state = ToolParseState::Done;
                                         } else {
-                                            debug!(
+                                            warn!(
                                                 target: "adapter",
                                                 "tool_parser 解析失败→请求修复"
                                             );
@@ -420,7 +420,7 @@ where
                                         }
                                         *this.state = ToolParseState::Done;
                                     } else {
-                                        debug!(
+                                        warn!(
                                             target: "adapter",
                                             "tool_parser 解析失败→请求修复"
                                         );
@@ -475,7 +475,7 @@ where
                                             choice.finish_reason = Some("tool_calls");
                                         }
                                     } else {
-                                        debug!(
+                                        warn!(
                                             target: "adapter",
                                             "tool_parser finish→请求修复"
                                         );
@@ -540,7 +540,7 @@ where
                                 );
                                 return Poll::Ready(Some(Ok(chunk)));
                             } else {
-                                debug!(
+                                warn!(
                                     target: "adapter",
                                     "tool_parser 流结束→请求修复"
                                 );

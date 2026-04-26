@@ -6,7 +6,7 @@ use std::task::{Context, Poll};
 use futures::Stream;
 use pin_project_lite::pin_project;
 
-use log::warn;
+use log::{trace, warn};
 
 use crate::openai_adapter::OpenAIAdapterError;
 
@@ -262,6 +262,7 @@ where
                     }
                     let mut frames = frames;
                     let first = frames.remove(0);
+                    trace!(target: "adapter", ">>> state: {}", trace_frame(&first));
                     // 剩余帧按正序压入 pending（先压后出的会逆序，所以逆序 extend）
                     this.pending.extend(frames.into_iter().rev());
                     return Poll::Ready(Some(Ok(first)));
@@ -273,6 +274,26 @@ where
                 Poll::Pending => return Poll::Pending,
             }
         }
+    }
+}
+
+/// TRACE 日志用：截断长文本，其余变体直接 Debug
+fn trace_frame(frame: &DsFrame) -> String {
+    const MAX_LEN: usize = 60;
+    match frame {
+        DsFrame::ContentDelta(s) | DsFrame::ThinkDelta(s) => {
+            let ty = if matches!(frame, DsFrame::ContentDelta(_)) {
+                "ContentDelta"
+            } else {
+                "ThinkDelta"
+            };
+            if s.len() > MAX_LEN {
+                format!("{}(\"{}\")", ty, &s[..MAX_LEN])
+            } else {
+                format!("{:?}", frame)
+            }
+        }
+        _ => format!("{:?}", frame),
     }
 }
 

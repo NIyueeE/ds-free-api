@@ -13,7 +13,7 @@ use crate::ds_core::client::{
 };
 use crate::ds_core::pow::{PowError, PowSolver};
 use futures::TryStreamExt;
-use log::{debug, info, warn};
+use log::{debug, error, info, warn};
 
 /// 账号状态信息
 pub struct AccountStatus {
@@ -62,6 +62,14 @@ impl Account {
     pub fn set_next_message_id(&self, model_type: &str, id: i64) {
         if let Some(s) = self.sessions.write().unwrap().get_mut(model_type) {
             s.next_message_id = id;
+        }
+    }
+
+    pub fn display_id(&self) -> &str {
+        if !self.email.is_empty() {
+            &self.email
+        } else {
+            &self.mobile
         }
     }
 
@@ -162,6 +170,7 @@ impl AccountPool {
         self.accounts = results.into_iter().flatten().collect();
 
         if self.accounts.is_empty() {
+            error!(target: "ds_core::accounts", "所有账号初始化失败");
             return Err(PoolError::AllAccountsFailed);
         }
 
@@ -323,10 +332,16 @@ async fn try_init_account(
     );
     let token = login_data.user.token;
 
+    let display_id = if creds.mobile.is_empty() {
+        &creds.email
+    } else {
+        &creds.mobile
+    };
+
     let mut sessions = HashMap::new();
     for model_type in model_types {
         let session_id = client.create_session(&token).await?;
-        health_check(&token, &session_id, client, solver, model_type).await?;
+        health_check(&token, &session_id, client, solver, model_type, display_id).await?;
 
         let title_payload = UpdateTitlePayload {
             chat_session_id: session_id.clone(),
@@ -361,8 +376,9 @@ async fn health_check(
     client: &DsClient,
     solver: &PowSolver,
     model_type: &str,
+    display_id: &str,
 ) -> Result<(), PoolError> {
-    debug!(target: "ds_core::accounts", "health_check model_type={}", model_type);
+    debug!(target: "ds_core::accounts", "health_check model_type={} account={}", model_type, display_id);
     let challenge = client.create_pow_challenge(token).await?;
 
     let result = solver.solve(&challenge)?;
@@ -385,6 +401,6 @@ async fn health_check(
         let _ = chunk;
     }
 
-    debug!(target: "ds_core::accounts", "health_check 完成 model_type={}", model_type);
+    debug!(target: "ds_core::accounts", "health_check 完成 model_type={} account={}", model_type, display_id);
     Ok(())
 }

@@ -20,6 +20,12 @@ pub struct ChatRequest {
     pub model_type: String,
 }
 
+/// v0_chat 返回值：SSE 字节流 + 账号标识
+pub struct ChatResponse {
+    pub stream: Pin<Box<dyn Stream<Item = Result<Bytes, CoreError>> + Send>>,
+    pub account_id: String,
+}
+
 pin_project! {
     pub struct GuardedStream<S> {
         #[pin]
@@ -119,31 +125,30 @@ impl Completions {
     pub async fn v0_chat(
         &self,
         req: ChatRequest,
-    ) -> Result<Pin<Box<dyn Stream<Item = Result<Bytes, CoreError>> + Send>>, CoreError> {
+        request_id: &str,
+    ) -> Result<ChatResponse, CoreError> {
         let guard = self.pool.get_account(&req.model_type).ok_or_else(|| {
-            log::info!(
+            log::warn!(
                 target: "ds_core::accounts",
-                "账号池无可用账号: model_type={}", req.model_type
+                "req={} 账号池无可用账号: model_type={}", request_id, req.model_type
             );
             CoreError::Overloaded
         })?;
 
         let account = guard.account();
-        let token_preview = if account.token().len() > 8 {
-            format!("{}...", &account.token()[..8])
-        } else {
-            account.token().to_string()
-        };
-        log::debug!(
-            target: "ds_core::accounts",
-            "分配账号: model_type={}, token={}", req.model_type, token_preview
-        );
+        let account_id = account.display_id().to_string();
         let token = account.token().to_string();
+
         let session_id = account
             .session_id(&req.model_type)
             .expect("初始化时已保证存在该 model_type 的 session");
 
         let edit_message_id = account.next_message_id(&req.model_type);
+        log::debug!(
+            target: "ds_core::accounts",
+            "req={} 分配账号: model_type={}, token={}..{}", request_id, req.model_type,
+            &account_id[..4.min(account_id.len())], &account_id[account_id.len().saturating_sub(4)..]
+        );
         let pow_header = self.compute_pow(&token).await?;
 
         let payload = EditMessagePayload {
@@ -183,14 +188,14 @@ impl Completions {
         if is_rate_limit_hint(&second_block) {
             log::warn!(
                 target: "ds_core::accounts",
-                "edit_message 被限流: edit_msg={}", edit_message_id
+                "req={} edit_message 被限流: edit_msg={}", request_id, edit_message_id
             );
             return Err(CoreError::Overloaded);
         }
 
         log::debug!(
             target: "ds_core::accounts",
-            "SSE ready: edit_msg={} -> req={} resp={}", edit_message_id, next_edit_id, stop_id
+            "req={} SSE ready: edit_msg={} -> req={} resp={}", request_id, edit_message_id, next_edit_id, stop_id
         );
 
         // 更新 session 的下次 edit_message_id
@@ -200,19 +205,25 @@ impl Completions {
         let stream =
             futures::stream::once(futures::future::ready(Ok(Bytes::from(buf)))).chain(raw_stream);
 
-        Ok(Box::pin(GuardedStream::new(
-            Box::pin(stream),
-            guard,
-            self.client.clone(),
-            token,
-            session_id,
-            stop_id,
-        )))
+        Ok(ChatResponse {
+            stream: Box::pin(GuardedStream::new(
+                Box::pin(stream),
+                guard,
+                self.client.clone(),
+                token,
+                session_id,
+                stop_id,
+            )),
+            account_id,
+        })
     }
 
     async fn compute_pow(&self, token: &str) -> Result<String, CoreError> {
         let challenge_data = self.client.create_pow_challenge(token).await?;
-        let result = self.solver.solve(&challenge_data)?;
+        let result = self.solver.solve(&challenge_data).map_err(|e| {
+            log::error!(target: "ds_core::accounts", "PoW 计算失败: {}", e);
+            CoreError::ProofOfWorkFailed(e)
+        })?;
         Ok(result.to_header())
     }
 

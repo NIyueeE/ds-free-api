@@ -8,9 +8,7 @@ mod completions;
 mod pow;
 
 pub use accounts::AccountStatus;
-pub use completions::ChatRequest;
-
-use std::pin::Pin;
+pub use completions::{ChatRequest, ChatResponse};
 
 use crate::config::Config;
 use accounts::AccountPool;
@@ -84,17 +82,15 @@ impl DeepSeekCore {
         Ok(Self { completions })
     }
 
-    /// 发起对话请求，返回 SSE 字节流
+    /// 发起对话请求，返回 SSE 字节流 + 账号标识
     ///
     /// 流结束或丢弃时自动释放账号
     pub async fn v0_chat(
         &self,
         req: ChatRequest,
-    ) -> Result<
-        Pin<Box<dyn futures::Stream<Item = Result<bytes::Bytes, CoreError>> + Send>>,
-        CoreError,
-    > {
-        self.completions.v0_chat(req).await
+        request_id: &str,
+    ) -> Result<ChatResponse, CoreError> {
+        self.completions.v0_chat(req, request_id).await
     }
 
     pub fn account_statuses(&self) -> Vec<AccountStatus> {

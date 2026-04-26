@@ -14,7 +14,7 @@ use std::task::{Context, Poll};
 
 use bytes::Bytes;
 use futures::{Stream, StreamExt};
-use log::{debug, warn};
+use log::{debug, info, trace, warn};
 use pin_project_lite::pin_project;
 use rand::RngExt;
 use std::future::Future;
@@ -180,11 +180,12 @@ impl Stream for RepairStream {
                         Some(Poll::Ready(Some(Err(OpenAIAdapterError::ToolCallRepairNeeded(
                             raw_xml,
                         ))))) => {
-                            debug!(
+                            warn!(
                                 target: "adapter",
                                 "RepairStream 捕获修复请求: len={}",
                                 raw_xml.len()
                             );
+                            trace!(target: "adapter", ">>> repair: accepting raw_xml len={}", raw_xml.len());
                             drop(this.inner.as_mut().get_mut().take());
                             if let Some(f) = this.repair_fn.take() {
                                 let future = f(raw_xml);
@@ -209,11 +210,12 @@ impl Stream for RepairStream {
 
                 RepairState::Repairing { future } => match future.as_mut().poll(cx) {
                     Poll::Ready(Ok(calls)) => {
-                        debug!(
+                        info!(
                             target: "adapter",
                             "tool_calls 修复成功: {} 个工具调用",
                             calls.len()
                         );
+                        trace!(target: "adapter", ">>> repair: success {} calls", calls.len());
                         *this.state = RepairState::Done;
                         return Poll::Ready(Some(Ok(converter::make_chunk(
                             this.model,
@@ -225,7 +227,7 @@ impl Stream for RepairStream {
                         ))));
                     }
                     Poll::Ready(Err(e)) => {
-                        debug!(target: "adapter", "tool_calls 修复失败: {}", e);
+                        warn!(target: "adapter", "tool_calls 修复失败: {}", e);
                         *this.state = RepairState::RepairFailed(format!("修复失败: {}", e));
                         continue;
                     }
@@ -295,6 +297,7 @@ where
                     {
                         this.buffer.push_str(content);
                         if let Some(pos) = find_stop_pos(this.buffer, this.stop) {
+                            trace!(target: "adapter", ">>> stop: truncate at {}", pos);
                             let truncated = &this.buffer[*this.sent_len..pos];
                             if truncated.is_empty() {
                                 choice.delta.content = None;
@@ -634,7 +637,7 @@ mod tests {
         println!("\n=== AGGREGATED RESPONSE (tool_calls) ===");
         println!("{}", serde_json::to_string_pretty(&completion).unwrap());
         println!("=========================================\n");
-        assert!(completion["choices"][0]["message"]["content"].is_null());
+        assert_eq!(completion["choices"][0]["message"]["content"], "");
         let calls = completion["choices"][0]["message"]["tool_calls"]
             .as_array()
             .unwrap();
@@ -659,7 +662,7 @@ mod tests {
         println!("{}", serde_json::to_string_pretty(&completion).unwrap());
         println!("========================================================\n");
         // 尾随文本被 ToolCallStream 丢弃（与流式行为一致），仅保留 tool_calls
-        assert!(completion["choices"][0]["message"]["content"].is_null());
+        assert_eq!(completion["choices"][0]["message"]["content"], "");
         let calls = completion["choices"][0]["message"]["tool_calls"]
             .as_array()
             .unwrap();
@@ -690,6 +693,7 @@ mod tests {
         }
     }
 
+    #[ignore = "需要真实 DeepSeek API 调用，仅手动验证"]
     #[tokio::test]
     async fn stream_tool_calls_repair_with_live_ds() {
         // 优先用 e2e 测试配置，失败则回退到主配置
@@ -703,7 +707,7 @@ mod tests {
                 }
             },
         };
-        let repair_fn = adapter.create_repair_fn();
+        let repair_fn = adapter.create_repair_fn("repair-test");
 
         // 多种真实中毒场景：模型输出的 tool_calls 格式损坏
         let cases: &[(&str, &str)] = &[

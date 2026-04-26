@@ -17,11 +17,19 @@
 //!   source <file>                          - 从文件读取命令执行
 //!   quit | exit                            - 退出并清理
 
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use bytes::Bytes;
 use ds_free_api::{Config, OpenAIAdapter, StreamResponse};
 use futures::{StreamExt, future::join_all};
 use std::io::{self, Read, Write};
 use std::path::Path;
+
+static DEMO_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+fn demo_req_id() -> String {
+    format!("demo-{:x}", DEMO_COUNTER.fetch_add(1, Ordering::Relaxed))
+}
 
 fn read_line_lossy() -> io::Result<String> {
     let mut buf = Vec::new();
@@ -109,17 +117,21 @@ async fn handle_line(line: &str, adapter: &OpenAIAdapter) -> anyhow::Result<bool
         "chat" if parts.len() >= 2 => {
             let file = parts[1];
             let body = load_json(file)?;
-            println!(">>> chat: {}", file);
-            let mut stream = adapter.chat_completions_stream(&body).await?;
-            print_stream(&mut stream, false).await;
+            let rid = demo_req_id();
+            println!(">>> chat: {} [req={}]", file, rid);
+            let mut result = adapter.chat_completions_stream(&body, &rid).await?;
+            println!("[account: {}]", result.account_id);
+            print_stream(&mut result.data, false).await;
         }
 
         "raw" if parts.len() >= 2 => {
             let file = parts[1];
             let body = load_json(file)?;
-            println!(">>> raw: {}", file);
-            let mut stream = adapter.raw_chat_stream(&body).await?;
-            print_stream(&mut stream, true).await;
+            let rid = demo_req_id();
+            println!(">>> raw: {} [req={}]", file, rid);
+            let mut result = adapter.raw_chat_stream(&body, &rid).await?;
+            println!("[account: {}]", result.account_id);
+            print_stream(&mut result.data, true).await;
         }
 
         "compare" if parts.len() >= 2 => {
@@ -128,9 +140,14 @@ async fn handle_line(line: &str, adapter: &OpenAIAdapter) -> anyhow::Result<bool
             println!(">>> compare: {}", file);
 
             // 原始流
-            println!("\n═══ RAW DEEPSEEK SSE ═══════════════════════════════════════");
-            let raw_stream = adapter.raw_chat_stream(&body).await?;
-            consume_stream(raw_stream, |bytes| {
+            let rid1 = demo_req_id();
+            println!(
+                "\n═══ RAW DEEPSEEK SSE [req={}] ═════════════════════════════════",
+                rid1
+            );
+            let raw_result = adapter.raw_chat_stream(&body, &rid1).await?;
+            println!("[account: {}]", raw_result.account_id);
+            consume_stream(raw_result.data, |bytes| {
                 let text = String::from_utf8_lossy(&bytes);
                 for line in text.lines() {
                     println!("  {}", line);
@@ -139,9 +156,14 @@ async fn handle_line(line: &str, adapter: &OpenAIAdapter) -> anyhow::Result<bool
             .await;
 
             // 转换后流
-            println!("\n═══ CONVERTED OPENAI SSE ═══════════════════════════════════");
-            let converted_stream = adapter.chat_completions_stream(&body).await?;
-            consume_stream(converted_stream, |bytes| {
+            let rid2 = demo_req_id();
+            println!(
+                "\n═══ CONVERTED OPENAI SSE [req={}] ═════════════════════════════",
+                rid2
+            );
+            let converted_result = adapter.chat_completions_stream(&body, &rid2).await?;
+            println!("[account: {}]", converted_result.account_id);
+            consume_stream(converted_result.data, |bytes| {
                 let text = String::from_utf8_lossy(&bytes);
                 for line in text.lines() {
                     println!("  {}", line);
@@ -335,9 +357,11 @@ async fn run_concurrent(adapter: &OpenAIAdapter, count: usize, body: Vec<u8>, ra
             let body = body.clone();
             async move {
                 let req_start = std::time::Instant::now();
+                let rid = demo_req_id();
                 let result = if is_streaming {
-                    match adapter.chat_completions_stream(&body).await {
-                        Ok(mut stream) => {
+                    match adapter.chat_completions_stream(&body, &rid).await {
+                        Ok(result) => {
+                            let mut stream = result.data;
                             let mut output = String::new();
                             let mut ok = true;
                             while let Some(chunk) = stream.next().await {
@@ -391,8 +415,9 @@ async fn run_concurrent(adapter: &OpenAIAdapter, count: usize, body: Vec<u8>, ra
                         }
                     }
                 } else {
-                    match adapter.chat_completions(&body).await {
-                        Ok(json) => {
+                    match adapter.chat_completions(&body, &rid).await {
+                        Ok(result) => {
+                            let json = result.data;
                             let output = if raw {
                                 String::from_utf8_lossy(&json).to_string()
                             } else {

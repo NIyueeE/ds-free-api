@@ -7,7 +7,7 @@ use bytes::Bytes;
 use futures::Stream;
 use pin_project_lite::pin_project;
 
-use log::{debug, trace};
+use log::{trace, warn};
 
 use crate::openai_adapter::OpenAIAdapterError;
 
@@ -60,7 +60,7 @@ where
                     }
                 }
                 Poll::Ready(Some(Err(e))) => {
-                    debug!(target: "adapter", "SSE 流错误: {}", e);
+                    warn!(target: "adapter", "SSE 流错误: {}", e);
                     return Poll::Ready(Some(Err(OpenAIAdapterError::Internal(format!(
                         "SSE 流错误: {}",
                         e
