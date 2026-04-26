@@ -58,6 +58,13 @@ where
     }
 }
 
+/// v0_chat 的返回结果，包含 SSE 流和使用的账号标识
+pub struct ChatResponse {
+    pub stream: Pin<Box<dyn Stream<Item = Result<Bytes, CoreError>> + Send>>,
+    /// 使用的账号标识（优先 email，否则 mobile）
+    pub account_id: String,
+}
+
 pub struct Completions {
     client: DsClient,
     solver: PowSolver,
@@ -76,7 +83,7 @@ impl Completions {
     pub async fn v0_chat(
         &self,
         req: ChatRequest,
-    ) -> Result<Pin<Box<dyn Stream<Item = Result<Bytes, CoreError>> + Send>>, CoreError> {
+    ) -> Result<ChatResponse, CoreError> {
         let guard = self
             .pool
             .get_account(&req.model_type)
@@ -84,6 +91,7 @@ impl Completions {
 
         let account = guard.account();
         let token = account.token().to_string();
+        let account_id = account.display_id().to_string();
         let session_id = account
             .session_id(&req.model_type)
             .expect("初始化时已保证存在该 model_type 的 session")
@@ -105,7 +113,10 @@ impl Completions {
             .edit_message(&token, &pow_header, &payload)
             .await?;
 
-        Ok(Box::pin(GuardedStream::new(stream, guard)))
+        Ok(ChatResponse {
+            stream: Box::pin(GuardedStream::new(stream, guard)),
+            account_id,
+        })
     }
 
     async fn compute_pow(&self, token: &str) -> Result<String, CoreError> {

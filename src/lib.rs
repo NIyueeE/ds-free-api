@@ -7,4 +7,4 @@ pub mod server;
 pub use anthropic_compat::AnthropicCompat;
 pub use config::Config;
 pub use ds_core::{AccountStatus, ChatRequest, CoreError, DeepSeekCore};
-pub use openai_adapter::{OpenAIAdapter, OpenAIAdapterError, StreamResponse};
+pub use openai_adapter::{ChatResult, OpenAIAdapter, OpenAIAdapterError, StreamResponse};

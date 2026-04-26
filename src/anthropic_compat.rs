@@ -17,7 +17,7 @@ use bytes::Bytes;
 use futures::Stream;
 use log::debug;
 
-use crate::openai_adapter::{OpenAIAdapter, OpenAIAdapterError};
+use crate::openai_adapter::{ChatResult, OpenAIAdapter, OpenAIAdapterError};
 
 /// Anthropic 兼容层
 pub struct AnthropicCompat {
@@ -33,12 +33,16 @@ impl AnthropicCompat {
     /// POST /v1/messages (非流式)
     ///
     /// 将 Anthropic 请求映射为 OpenAI 请求，获取响应后再映射回 Anthropic Message 格式。
-    pub async fn messages(&self, body: &[u8]) -> Result<Vec<u8>, AnthropicCompatError> {
+    pub async fn messages(&self, body: &[u8]) -> Result<ChatResult<Vec<u8>>, AnthropicCompatError> {
         debug!(target: "anthropic_compat", "收到 messages 请求");
         let openai_body = request::to_openai_request(body)?;
-        let openai_json = self.openai_adapter.chat_completions(&openai_body).await?;
-        response::from_chat_completion_bytes(&openai_json)
-            .map_err(|e| AnthropicCompatError::Internal(format!("json error: {}", e)))
+        let result = self.openai_adapter.chat_completions(&openai_body).await?;
+        let anthropic_json = response::from_chat_completion_bytes(&result.data)
+            .map_err(|e| AnthropicCompatError::Internal(format!("json error: {}", e)))?;
+        Ok(ChatResult {
+            data: anthropic_json,
+            account_id: result.account_id,
+        })
     }
 
     /// POST /v1/messages (流式)
@@ -47,7 +51,7 @@ impl AnthropicCompat {
     pub async fn messages_stream(
         &self,
         body: &[u8],
-    ) -> Result<StreamResponse, AnthropicCompatError> {
+    ) -> Result<ChatResult<StreamResponse>, AnthropicCompatError> {
         debug!(target: "anthropic_compat", "收到流式 messages 请求");
         let openai_body = request::to_openai_request(body)?;
         let openai_req = self
@@ -55,23 +59,27 @@ impl AnthropicCompat {
             .parse_request(&openai_body)
             .map_err(AnthropicCompatError::from)?;
         let input_tokens = openai_req.prompt_tokens;
-        let ds_stream = self
+        let chat_resp = self
             .openai_adapter
             .try_chat(openai_req.ds_req)
             .await
             .map_err(OpenAIAdapterError::from)?;
+        let account_id = chat_resp.account_id;
         let openai_stream = crate::openai_adapter::response::stream(
-            ds_stream,
+            chat_resp.stream,
             openai_req.model,
             openai_req.include_usage,
             openai_req.include_obfuscation,
             openai_req.stop,
             openai_req.prompt_tokens,
         );
-        Ok(response::from_chat_completion_stream(
-            openai_stream,
-            input_tokens,
-        ))
+        Ok(ChatResult {
+            data: response::from_chat_completion_stream(
+                openai_stream,
+                input_tokens,
+            ),
+            account_id,
+        })
     }
 
     /// GET /v1/models

@@ -14,6 +14,7 @@ use futures::StreamExt;
 /// SSE 响应体包装器（泛型）
 pub struct SseBody<S> {
     inner: S,
+    extra_headers: Vec<(String, String)>,
 }
 
 impl<S, E> SseBody<S>
@@ -22,7 +23,16 @@ where
     E: std::fmt::Display + Send + Sync + 'static,
 {
     pub fn new(stream: S) -> Self {
-        Self { inner: stream }
+        Self {
+            inner: stream,
+            extra_headers: Vec::new(),
+        }
+    }
+
+    /// 添加自定义响应头
+    pub fn with_header(mut self, name: &str, value: &str) -> Self {
+        self.extra_headers.push((name.to_string(), value.to_string()));
+        self
     }
 }
 
@@ -39,15 +49,16 @@ where
             })
         }));
 
-        (
-            StatusCode::OK,
-            [
-                (header::CONTENT_TYPE, "text/event-stream"),
-                (header::CACHE_CONTROL, "no-cache"),
-                (header::CONNECTION, "keep-alive"),
-            ],
-            body,
-        )
-            .into_response()
+        let mut builder = Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, "text/event-stream")
+            .header(header::CACHE_CONTROL, "no-cache")
+            .header(header::CONNECTION, "keep-alive");
+
+        for (name, value) in &self.extra_headers {
+            builder = builder.header(name.as_str(), value.as_str());
+        }
+
+        builder.body(body).unwrap().into_response()
     }
 }

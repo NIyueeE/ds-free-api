@@ -19,6 +19,12 @@ mod types;
 /// 流式响应类型
 pub type StreamResponse = Pin<Box<dyn Stream<Item = Result<Bytes, OpenAIAdapterError>> + Send>>;
 
+/// chat completions 结果，包含响应数据和使用的账号标识
+pub struct ChatResult<T> {
+    pub data: T,
+    pub account_id: String,
+}
+
 /// OpenAI 适配器
 pub struct OpenAIAdapter {
     ds_core: DeepSeekCore,
@@ -53,40 +59,47 @@ impl OpenAIAdapter {
     /// POST /v1/chat/completions (非流式)
     ///
     /// 底层复用流式接口，将 SSE 流聚合为单个 JSON 对象后返回
-    pub async fn chat_completions(&self, body: &[u8]) -> Result<Vec<u8>, OpenAIAdapterError> {
+    pub async fn chat_completions(&self, body: &[u8]) -> Result<ChatResult<Vec<u8>>, OpenAIAdapterError> {
         let req = request::parse(body, &self.model_registry)?;
-        let stream = self.try_chat(req.ds_req).await?;
-        response::aggregate(stream, req.model, req.stop, req.prompt_tokens).await
+        let chat_resp = self.try_chat(req.ds_req).await?;
+        let json = response::aggregate(chat_resp.stream, req.model, req.stop, req.prompt_tokens).await?;
+        Ok(ChatResult {
+            data: json,
+            account_id: chat_resp.account_id,
+        })
     }
 
     /// POST /v1/chat/completions (流式)
     pub async fn chat_completions_stream(
         &self,
         body: &[u8],
-    ) -> Result<StreamResponse, OpenAIAdapterError> {
+    ) -> Result<ChatResult<StreamResponse>, OpenAIAdapterError> {
         let req = request::parse(body, &self.model_registry)?;
-        let stream = self.try_chat(req.ds_req).await?;
-        Ok(response::stream(
-            stream,
-            req.model,
-            req.include_usage,
-            req.include_obfuscation,
-            req.stop,
-            req.prompt_tokens,
-        ))
+        let chat_resp = self.try_chat(req.ds_req).await?;
+        Ok(ChatResult {
+            data: response::stream(
+                chat_resp.stream,
+                req.model,
+                req.include_usage,
+                req.include_obfuscation,
+                req.stop,
+                req.prompt_tokens,
+            ),
+            account_id: chat_resp.account_id,
+        })
     }
 
     /// 内部辅助：对 `Overloaded` 进行短延迟轮询重试，降低瞬时并发峰值导致的失败率
     pub(crate) async fn try_chat(
         &self,
         req: crate::ds_core::ChatRequest,
-    ) -> Result<Pin<Box<dyn Stream<Item = Result<Bytes, CoreError>> + Send>>, CoreError> {
+    ) -> Result<crate::ds_core::ChatResponse, CoreError> {
         const MAX_RETRIES: usize = 3;
         const RETRY_DELAY_MS: u64 = 200;
 
         for attempt in 0..MAX_RETRIES {
             match self.ds_core.v0_chat(req.clone()).await {
-                Ok(stream) => return Ok(Box::pin(stream)),
+                Ok(resp) => return Ok(resp),
                 Err(CoreError::Overloaded) if attempt + 1 < MAX_RETRIES => {
                     tokio::time::sleep(std::time::Duration::from_millis(RETRY_DELAY_MS)).await;
                 }
@@ -118,12 +131,15 @@ impl OpenAIAdapter {
     /// 原始 DeepSeek SSE 流（不经 OpenAI 协议转换）
     ///
     /// 用于流分析：对比原始响应与 OpenAI 转换后的差异，定位转换 bug
-    pub async fn raw_chat_stream(&self, body: &[u8]) -> Result<StreamResponse, OpenAIAdapterError> {
+    pub async fn raw_chat_stream(&self, body: &[u8]) -> Result<ChatResult<StreamResponse>, OpenAIAdapterError> {
         let req = request::parse(body, &self.model_registry)?;
-        let stream = self.try_chat(req.ds_req).await?;
-        Ok(Box::pin(
-            stream.map(|r| r.map_err(OpenAIAdapterError::from)),
-        ))
+        let chat_resp = self.try_chat(req.ds_req).await?;
+        Ok(ChatResult {
+            data: Box::pin(
+                chat_resp.stream.map(|r| r.map_err(OpenAIAdapterError::from)),
+            ),
+            account_id: chat_resp.account_id,
+        })
     }
 
     /// 获取 ds_core 账号池状态

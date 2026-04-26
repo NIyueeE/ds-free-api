@@ -43,6 +43,15 @@ impl Account {
     pub fn is_busy(&self) -> bool {
         self.is_busy.load(Ordering::Relaxed)
     }
+
+    /// 可展示的账号标识（优先 email，否则 mobile）
+    pub fn display_id(&self) -> &str {
+        if !self.email.is_empty() {
+            &self.email
+        } else {
+            &self.mobile
+        }
+    }
 }
 
 /// 持有期间账号标记为 busy，Drop 时自动释放

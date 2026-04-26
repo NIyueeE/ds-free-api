@@ -110,7 +110,9 @@ async fn handle_line(line: &str, adapter: &OpenAIAdapter) -> anyhow::Result<bool
             let file = parts[1];
             let body = load_json(file)?;
             println!(">>> chat: {}", file);
-            let mut stream = adapter.chat_completions_stream(&body).await?;
+            let result = adapter.chat_completions_stream(&body).await?;
+            println!("[account: {}]", result.account_id);
+            let mut stream = result.data;
             print_stream(&mut stream, false).await;
         }
 
@@ -118,7 +120,9 @@ async fn handle_line(line: &str, adapter: &OpenAIAdapter) -> anyhow::Result<bool
             let file = parts[1];
             let body = load_json(file)?;
             println!(">>> raw: {}", file);
-            let mut stream = adapter.raw_chat_stream(&body).await?;
+            let result = adapter.raw_chat_stream(&body).await?;
+            println!("[account: {}]", result.account_id);
+            let mut stream = result.data;
             print_stream(&mut stream, true).await;
         }
 
@@ -129,8 +133,9 @@ async fn handle_line(line: &str, adapter: &OpenAIAdapter) -> anyhow::Result<bool
 
             // 原始流
             println!("\n═══ RAW DEEPSEEK SSE ═══════════════════════════════════════");
-            let raw_stream = adapter.raw_chat_stream(&body).await?;
-            consume_stream(raw_stream, |bytes| {
+            let raw_result = adapter.raw_chat_stream(&body).await?;
+            println!("[account: {}]", raw_result.account_id);
+            consume_stream(raw_result.data, |bytes| {
                 let text = String::from_utf8_lossy(&bytes);
                 for line in text.lines() {
                     println!("  {}", line);
@@ -140,8 +145,9 @@ async fn handle_line(line: &str, adapter: &OpenAIAdapter) -> anyhow::Result<bool
 
             // 转换后流
             println!("\n═══ CONVERTED OPENAI SSE ═══════════════════════════════════");
-            let converted_stream = adapter.chat_completions_stream(&body).await?;
-            consume_stream(converted_stream, |bytes| {
+            let converted_result = adapter.chat_completions_stream(&body).await?;
+            println!("[account: {}]", converted_result.account_id);
+            consume_stream(converted_result.data, |bytes| {
                 let text = String::from_utf8_lossy(&bytes);
                 for line in text.lines() {
                     println!("  {}", line);
@@ -337,7 +343,8 @@ async fn run_concurrent(adapter: &OpenAIAdapter, count: usize, body: Vec<u8>, ra
                 let req_start = std::time::Instant::now();
                 let result = if is_streaming {
                     match adapter.chat_completions_stream(&body).await {
-                        Ok(mut stream) => {
+                        Ok(result) => {
+                            let mut stream = result.data;
                             let mut output = String::new();
                             let mut ok = true;
                             while let Some(chunk) = stream.next().await {
@@ -392,7 +399,8 @@ async fn run_concurrent(adapter: &OpenAIAdapter, count: usize, body: Vec<u8>, ra
                     }
                 } else {
                     match adapter.chat_completions(&body).await {
-                        Ok(json) => {
+                        Ok(result) => {
+                            let json = result.data;
                             let output = if raw {
                                 String::from_utf8_lossy(&json).to_string()
                             } else {
