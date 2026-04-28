@@ -11,21 +11,35 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   内部根据 `stream` 字段自动分流到 SSE 流或 JSON 聚合
 - **移除中间结构体**：删除 `AdapterRequest` 和 `prepare` 函数，
   `ChatCompletionsRequest` 贯穿 normalize → tools → prompt → resolver → 分流全管道
-- **Anthropic 请求转换直达**：`to_chat_completions_request()` 直接将 Anthropic 类型构造为
-  `ChatCompletionsRequest` 结构体，不再经过 `serde_json::Value` → JSON bytes → `serde_json::from_slice` 的中间序列化
-- **Anthropic 消息入口统一**：合并 `messages()` / `messages_stream()` 为单一 `messages()` 方法，
-  新增 `AnthropicOutput` 枚举（`Stream` / `Json`），与 `ChatOutput` 对称；
-  handler 不再提前解析 `stream` 字段
+- **Anthropic 请求转换直达**：`into_chat_completions()` 纯结构体转换 `MessagesRequest → ChatCompletionsRequest`，
+  零 JSON 参与，handler 层 `serde_json::from_slice` 后全链路结构体操作
+- **Anthropic 消息入口统一**：合并 `messages()` / `messages_stream()` 为单一 `messages(req: MessagesRequest)` 方法，
+  新增 `AnthropicOutput` 枚举（`Stream` / `Json`），与 `ChatOutput` 完全对称；
+  handler 不再提前解析 `stream` 字段，JSON 反序列化提至 handler 层对齐 OpenAI 路径
+- **Anthropic 类型定义独立**：`types.rs` 专放 Anthropic 协议类型，`request.rs` 只放转换逻辑，
+  与 `openai_adapter` 模块结构对称
+- **`#![allow(dead_code)]` 精细化**：Anthropic 模块从文件级改为字段级标注，`ds_core/client.rs` 同样缩减为字段级
+- **`ds_core` 文件上传顺序修正**：历史文件（`EMPTY.txt`）优先于外部文件上传，对齐对话阅读顺序
 - **`ChatCompletionRequest` 重命名**：`ChatCompletionRequest` → `ChatCompletionsRequest`，
   命名对齐实际端点路径
-- **ChatOutput 扩展**：`Stream` 变体携带 `input_tokens`，anthropic 流式路径无需再手动调用内部管道
+- **`ChatOutput::Stream` 简化**：移除 `input_tokens` 字段，`prompt_tokens` 由 `ConverterStream` 
+  在第一个 role chunk 的 usage 中携带，下游按需读取；`from_chat_completion_stream` 不再需要 `input_tokens` 参数
+- **响应管道分离**：`StopStream` 拆为 `StopDetectStream`（stop 检测 + obfuscation，输出结构体）+ `SseSerializer`（仅序列化），
+  `stream()` 返回 `ChunkStream` 而非 `StreamResponse`，SSE 序列化提至 handler 层
+- **中间类型全面清除**：删除 `OpenAiCompletion`、`OpenAiChoice`、`OpenAiMessage`、`OpenAiToolCall`、
+  `OpenAiFunctionCall`、`OpenAiCustomToolCall`、`OpenAiUsage`、`SseBuffer`、`OpenAiChunk`、`OpenAiChunkChoice`、`OpenAiDelta` 等 11 个中间类型
+- **模型类型命名规范**：`Model` → `OpenAIModel`，`ModelList` → `OpenAIModelList`（openai 侧）；
+  `ModelInfo` → `AnthropicModel`，`ModelListResponse` → `AnthropicModelList`（anthropic 侧）；
+  模型列表和详情均输出结构体，序列化提至 handler 层
+- **`raw_chat_stream` 重命名**：→ `raw_chat_completions_stream`，对齐 `chat_completions` 命名
 - **响应类型重命名**：`ChatCompletion` → `ChatCompletionsResponse`，`ChatCompletionChunk` → `ChatCompletionsResponseChunk`，命名与请求端对齐
-- **`#![allow(dead_code)]` 移除**：不再需要文件级允许
 
 ### Removed
 - **`AdapterRequest` / `prepare` 函数**：被内联到 `chat_completions` 中
 - **`parse_request` 方法**：不再需要，外部直接 `serde_json::from_slice` 构造 `ChatCompletionsRequest`
 - **冗余单元测试**：删除 7 个重叠测试（`multimodal_user`、`tools_injection`、`tools_after_tool_role_message`、`function_call_none_ignores_functions`、`stream_true`、`aggregate_tool_calls_with_trailing_text`），合并 `stream_options_defaults`/`explicit` 为参数化测试
+- **Anthropic 模块测试精炼**：删除 `top_k_not_mapped`、`stream_tool_calls`、`malformed_json_error`，
+  合并 `image_base64`/`image_url`、`tool_calls`/`text_and_tool_calls`、`empty_content`/`null_content` 为参数化测试
 - **`stream_tool_calls_repair_with_live_ds` 忽略测试**：已由 `py-e2e-tests/scenarios/repair/` 覆盖，不再保留被 `#[ignore]` 的死代码
 
 ## [0.2.4] - 2026-04-27

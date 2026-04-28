@@ -17,18 +17,19 @@ pub(crate) mod request;
 pub(crate) mod response;
 pub(crate) mod types;
 
-pub use types::ChatCompletionsRequest;
+pub use types::{ChatCompletionsRequest, ChatCompletionsResponse, ChatCompletionsResponseChunk};
 
-/// 流式响应类型
+/// 流式响应类型（SSE 字节流）
 pub type StreamResponse = Pin<Box<dyn Stream<Item = Result<Bytes, OpenAIAdapterError>> + Send>>;
+
+/// 流式响应结构体流
+pub type ChunkStream =
+    Pin<Box<dyn Stream<Item = Result<ChatCompletionsResponseChunk, OpenAIAdapterError>> + Send>>;
 
 /// Chat Completions 统一输出
 pub enum ChatOutput {
-    Stream {
-        stream: StreamResponse,
-        input_tokens: u32,
-    },
-    Json(Vec<u8>),
+    Stream(ChunkStream),
+    Json(ChatCompletionsResponse),
 }
 
 /// adapter 层通用结果包装：携带请求结果和账号标识
@@ -140,10 +141,7 @@ impl OpenAIAdapter {
                 Some(repair_fn),
             );
             Ok(ChatResult {
-                data: ChatOutput::Stream {
-                    stream: s,
-                    input_tokens: prompt_tokens,
-                },
+                data: ChatOutput::Stream(s),
                 account_id,
             })
         } else {
@@ -186,7 +184,7 @@ impl OpenAIAdapter {
     }
 
     /// GET /v1/models
-    pub fn list_models(&self) -> Vec<u8> {
+    pub fn list_models(&self) -> types::OpenAIModelList {
         models::list(
             &self.model_types,
             &self.max_input_tokens,
@@ -195,7 +193,7 @@ impl OpenAIAdapter {
     }
 
     /// GET /v1/models/{model_id}
-    pub fn get_model(&self, model_id: &str) -> Option<Vec<u8>> {
+    pub fn get_model(&self, model_id: &str) -> Option<types::OpenAIModel> {
         models::get(
             &self.model_types,
             &self.max_input_tokens,
@@ -207,7 +205,7 @@ impl OpenAIAdapter {
     /// 原始 DeepSeek SSE 流（不经 OpenAI 协议转换）
     ///
     /// 用于流分析：对比原始响应与 OpenAI 转换后的差异，定位转换 bug
-    pub async fn raw_chat_stream(
+    pub async fn raw_chat_completions_stream(
         &self,
         body: &[u8],
         request_id: &str,

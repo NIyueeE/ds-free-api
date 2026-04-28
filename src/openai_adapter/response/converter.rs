@@ -119,14 +119,18 @@ where
                 Poll::Ready(Some(Ok(frame))) => match frame {
                     DsFrame::Role => {
                         trace!(target: "adapter", ">>> conv: role=assistant");
-                        return Poll::Ready(Some(Ok(make_chunk(
-                            this.model,
-                            Delta {
-                                role: Some("assistant"),
-                                ..Default::default()
-                            },
-                            None,
-                        ))));
+                        // 第一个 chunk 带上 prompt_tokens，供下游（如 AnthropicStream）提前获取
+                        return Poll::Ready(Some(Ok(ChatCompletionsResponseChunk {
+                            usage: Some(make_usage(*this.prompt_tokens, 0)),
+                            ..make_chunk(
+                                this.model,
+                                Delta {
+                                    role: Some("assistant"),
+                                    ..Default::default()
+                                },
+                                None,
+                            )
+                        })));
                     }
                     DsFrame::ThinkDelta(text) => {
                         trace!(target: "adapter", ">>> conv: thinking len={}", text.len());

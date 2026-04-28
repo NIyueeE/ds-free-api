@@ -25,7 +25,7 @@
 
 - **零成本 API 代理**：使用 DeepSeek 免费网页端，无需官方 API Key，即可获得 OpenAI / Anthropic 兼容接口
 - **双协议支持**：同时兼容 OpenAI Chat Completions 与 Anthropic Messages API，主流客户端即插即用
-- **工具调用就绪**：OpenAI function calling 完整实现，XML 解析 + 三层自修复管道（文本修复 → JSON 修复 → 模型兜底），覆盖 10+ 异常格式
+- **工具调用就绪**：OpenAI function calling 完整实现，工具解析 + 三层自修复管道（文本修复 → JSON 修复 → 模型兜底），覆盖 10+ 异常格式
 - **Rust 实现**：单可执行文件 + 单 TOML 配置，跨平台原生高性能
 - **多账号池**：空闲最久优先轮转，支持水平扩展并发
 
@@ -44,7 +44,7 @@
 
 ### 配置
 
-复制 `config.example.toml` 为 `config.toml`，和可执行文件保持在同一个路径下，或者使用 `./ds-free-api -c <config_path>` 指定配置路径。
+复制 `config.example.toml` 为 `config.toml`，和可执行文件保持在同一个路径下，或者使用 `./ds-free-api -c <config_path>`  指定配置路径。
 
 ### 运行
 
@@ -86,7 +86,7 @@ area_code = ""
 password = "pass1"
 ```
 
-这里分享一个免费的测试账号，不要发敏感信息（虽然程序每次会收尾删除会话，但是可能会遗留）。
+这里分享几个免费的测试账号，不要发敏感信息（虽然程序每次会收尾删除会话，但是可能会遗留）。
 
 ```text
 rivigol378@tatefarm.com
@@ -148,7 +148,7 @@ cargo test
 # 运行 HTTP 服务
 just serve
 
-# 统一协议调试 CLI
+# 统一协议调试 CLI（内置对话/比较/并发等模式）
 just adapter-cli
 
 # e2e 测试（需要服务已在 5317 端口运行，场景正交）
@@ -164,75 +164,163 @@ just e2e-serve
 
 ```mermaid
 flowchart TB
-    %% ========== 样式定义：提高对比度，统一圆角 ==========
-    classDef client fill:#dbeafe,stroke:#2563eb,stroke-width:3px,color:#1e40af,rx:12,ry:12
-    classDef gateway fill:#fef9c3,stroke:#ca8a04,stroke-width:3px,color:#854d0e,rx:10,ry:10
-    classDef adapter fill:#fae8ff,stroke:#a21caf,stroke-width:2px,color:#701a75,rx:8,ry:8
-    classDef core fill:#dcfce7,stroke:#15803d,stroke-width:2px,color:#14532d,rx:8,ry:8
-    classDef external fill:#fee2e2,stroke:#dc2626,stroke-width:3px,color:#991b1b,rx:4,ry:4
+    %% ===== 主题定义 =====
+    classDef client fill:#eff6ff,stroke:#3b82f6,stroke-width:3px,color:#1d4ed8,rx:14,ry:14
+    classDef gateway fill:#fffbeb,stroke:#f59e0b,stroke-width:3px,color:#92400e,rx:12,ry:12
+    classDef openai_adapter fill:#f8fafc,stroke:#0a9e7b,stroke-width:2px,color:#334155,rx:10,ry:10
+    classDef anthropic_compat fill:#f8fafc,stroke:#d07354,stroke-width:2px,color:#334155,rx:10,ry:10
+    classDef ds_core fill:#f8fafc,stroke:#3964fe,stroke-width:2px,color:#1e40af,rx:10,ry:10
+    classDef external fill:#fef2f2,stroke:#ef4444,stroke-width:3px,color:#991b1b,rx:6,ry:6
 
-    %% ========== 节点定义 ==========
-    Client(["🖥️ 客户端<br/>OpenAI / Anthropic 协议"]):::client
+    %% ===== 节点 =====
+    Client(["🖥️ 客户端"]):::client
 
-    subgraph GW ["🌐 接入层 (axum HTTP)"]
-        Server(["🔀 路由 / 鉴权"]):::gateway
+    subgraph GW ["🌐 HTTP 接入层"]
+        Handler(["路由 / 鉴权 / 序列化"]):::gateway
     end
 
-    subgraph PL ["📦 协议处理层 (Protocol Layer)"]
-        direction LR
-
-        subgraph AC ["🔀 Anthropic 兼容层 (anthropic_compat)"]
-            A2OReq["Anthropic → OpenAI<br/>请求映射"]:::adapter
-            O2AResp["OpenAI → Anthropic<br/>响应映射"]:::adapter
-        end
-
-        subgraph OA ["⚙️ OpenAI 适配层 (openai_adapter)"]
-            ReqParse["请求解析"]:::adapter
-            RespTrans["响应转换"]:::adapter
-        end
-    end
-
-    subgraph CL ["⚡ 核心逻辑层 (ds_core)"]
+    subgraph PL ["⚙️ 协议处理层"]
         direction TB
-        Pool["🔄 账号池轮转"]:::core
-        Pow["⛏️ PoW 求解"]:::core
-        Chat["💬 对话编排"]:::core
-        Upload["📄 历史文件上传"]:::core
+
+        subgraph AC ["Anthropic 兼容层"]
+            A2O["请求转换<br/>Anthropic → OpenAI"]:::anthropic_compat
+            O2A["响应转换<br/>OpenAI → Anthropic"]:::anthropic_compat
+        end
+
+        subgraph OA ["OpenAI 适配层"]
+            ReqPipe["请求管道<br/>校验 / 工具提取 / 提示词构建"]:::openai_adapter
+            RespPipe["响应管道<br/>SSE 解析 / 格式转换 / 工具修复"]:::openai_adapter
+        end
+    end
+
+    subgraph CL ["🔧 核心层 (ds_core)"]
+        Pool["账号池轮转"]:::ds_core
+        PoW["PoW 求解"]:::ds_core
+        Session["会话编排<br/>创建销毁 / 历史上传"]:::ds_core
     end
 
     DeepSeek[("🔴 DeepSeek API")]:::external
 
-    %% ========== 请求链路（实线 →） ==========
-    Client -->|"OpenAI / Anthropic 协议"| Server
-    Server -->|"OpenAI 流量"| ReqParse
-    Server -->|"Anthropic 流量"| A2OReq
-    A2OReq --> ReqParse
-    ReqParse --> Pool
-    Pool --> Pow
-    Pow --> Chat
-    Chat -->|"拆分多轮历史"| Upload
-    Upload -->|"completion + 文件引用"| DeepSeek
+    %% ===== 连接 =====
+    Client -->|"HTTP 请求"| Handler
 
-    %% ========== 响应链路（虚线 -.-→） ==========
-    Chat -.->|"SSE 数据流"| RespTrans
-    RespTrans -.->|"OpenAI 响应"| Server
-    RespTrans -.->|"待转换响应"| O2AResp
-    O2AResp -.->|"Anthropic 响应"| Server
+    Handler -->|"OpenAI 请求结构体"| ReqPipe
+    Handler -->|"Anthropic 请求结构体"| A2O
+    A2O -->|"OpenAI 请求结构体"| ReqPipe
 
-    %% ========== 子图背景与边框（增强层次） ==========
-    style GW fill:#fefce8,stroke:#eab308,stroke-width:2px
-    style PL fill:#fafafa,stroke:#a3a3a3,stroke-width:2px
-    style AC fill:#fdf4ff,stroke:#c026d3,stroke-width:1px
-    style OA fill:#f5f3ff,stroke:#8b5cf6,stroke-width:1px
-    style CL fill:#f0fdf4,stroke:#22c55e,stroke-width:2px
+    ReqPipe --> Pool
+    Pool --> PoW
+    PoW --> Session
+    Session -->|"completion 端点"| DeepSeek
+
+    Session -.->|"DeepSeek SSE数据流"| RespPipe
+    RespPipe -.->|"OpenAI 响应结构体"| Handler
+    RespPipe -.->|"OpenAI 响应结构体"| O2A
+    O2A -.->|"Anthropic 响应结构体"| Handler
+
+    %% ===== 子图样式 =====
+    style GW fill:#fffbeb,stroke:#f59e0b,stroke-width:2px,stroke-dasharray: 5 5
+    style PL fill:#fafafa,stroke:#94a3b8,stroke-width:2px
+    style AC fill:#fdf0ec,stroke:#d07354,stroke-width:2px
+    style OA fill:#e6f7f3,stroke:#0a9e7b,stroke-width:2px
+    style CL fill:#eef2ff,stroke:#3964fe,stroke-width:2px,stroke-dasharray: 5 5
 ```
 
 ### 数据管道：
 
-- **OpenAI 请求**: `JSON body` → `normalize` 校验/默认值 → `tools` 提取 → `prompt` ChatML 构建 → `resolver` 模型映射 → `ChatRequest`
-- **OpenAI 响应**: `DeepSeek SSE bytes` → `sse_parser` → `state` 补丁状态机 → `converter` 格式转换 → `tool_parser` XML 解析 → `StopStream` 截断 → `OpenAI SSE bytes`
-- **Anthropic 请求**: `Anthropic JSON` → `to_openai_request()` → 进入 OpenAI 请求管道
-- **Anthropic 响应**: OpenAI 输出 → `from_chat_completion_stream()` / `from_chat_completion_bytes()` → `Anthropic SSE/JSON`
+#### OpenAI (chat_completions) 处理管道:
+
+```mermaid
+flowchart TB
+    %% ===== 主题定义 =====
+    classDef ds_core fill:#eef2ff,stroke:#3964fe,stroke-width:2.5px,color:#1e40af,rx:10,ry:10
+    classDef openai_adapter fill:#e6f7f3,stroke:#0a9e7b,stroke-width:2.5px,color:#065f46,rx:10,ry:10
+    classDef step fill:#fffbeb,stroke:#f59e0b,stroke-width:1.5px,color:#334155,rx:6,ry:6
+    classDef output fill:#fff7ed,stroke:#f97316,stroke-width:2.5px,color:#c2410c,rx:10,ry:10
+
+    subgraph RQ ["请求处理"]
+        direction TB
+        Q1["ChatCompletionsRequest"]:::openai_adapter
+        Q2["参数校验 + 默认值"]:::step
+        Q3["工具定义提取 + 注入提示词"]:::step
+        Q4["ChatML 提示词构建"]:::step
+        Q5["模型映射 + 能力开关"]:::step
+        Q6["限流重试<br/>指数退避 1s→2s→4s→8s→16s"]:::step
+        Q7["ChatRequest → ds_core"]:::output
+    end
+
+    subgraph RS1 ["非流式响应"]
+        direction TB
+        OR1["ds_core SSE 流"]:::ds_core
+        OR2["SSE 帧解析<br/>ContentDelta / Usage"]:::step
+        OR3["状态机重组<br/>合并连续文本 / 累积 usage"]:::step
+        OR4["chunk 聚合<br/>拼接 content / reasoning / tool_calls"]:::step
+        OR5["ChatCompletionsResponse"]:::openai_adapter
+    end
+
+    subgraph RS2 ["流式响应"]
+        direction TB
+        OS1["ds_core SSE 流"]:::ds_core
+        OS2["SSE 帧解析 + 状态机"]:::step
+        OS3["Chunk 转换<br/>DsFrame → ChatCompletionsResponseChunk"]:::step
+        OS4["工具调用 XML 解析"]:::step
+        OS5["异常工具调用自修复"]:::step
+        OS6["stop 序列检测 + obfuscation"]:::step
+        OS7["ChatCompletionsResponseChunk"]:::openai_adapter
+    end
+
+    Q1 --> Q2 --> Q3 --> Q4 --> Q5 --> Q6 --> Q7
+    OR1 --> OR2 --> OR3 --> OR4 --> OR5
+    OS1 --> OS2 --> OS3 --> OS4 --> OS5 --> OS6 --> OS7
+
+    style RQ fill:#f8fafc,stroke:#0a9e7b,stroke-width:2px
+    style RS1 fill:#f8fafc,stroke:#0a9e7b,stroke-width:2px
+    style RS2 fill:#f8fafc,stroke:#0a9e7b,stroke-width:2px
+```
+
+#### Anthropic (messages) 处理管道:
+
+```mermaid
+flowchart TB
+    %% ===== 主题定义 =====
+    classDef oai fill:#e6f7f3,stroke:#0a9e7b,stroke-width:2.5px,color:#065f46,rx:10,ry:10
+    classDef anth fill:#fdf0ec,stroke:#d07354,stroke-width:2.5px,color:#7c3a2a,rx:10,ry:10
+    classDef step fill:#fffbeb,stroke:#f59e0b,stroke-width:1.5px,color:#334155,rx:6,ry:6
+    classDef output fill:#fff7ed,stroke:#f97316,stroke-width:2.5px,color:#c2410c,rx:10,ry:10
+
+    subgraph RQ ["请求处理"]
+        direction TB
+        Q1["MessagesRequest"]:::anth
+        Q2["消息展开<br/>System 前置 / 文本合并 / 图片映射"]:::step
+        Q3["工具映射<br/>ToolUnion → OpenAI Tool"]:::step
+        Q4["能力开关映射<br/>thinking → reasoning_effort"]:::step
+        Q5["ChatCompletionsRequest"]:::oai
+    end
+
+    subgraph RS3 ["非流式响应"]
+        direction TB
+        AR1["ChatCompletionsResponse"]:::oai
+        AR2["Content 拆解<br/>reasoning → Thinking<br/>content → Text<br/>tool_calls → ToolUse"]:::step
+        AR3["ID 映射<br/>chatcmpl → msg<br/>call → toolu"]:::step
+        AR4["MessagesResponse"]:::anth
+    end
+
+    subgraph RS4 ["流式响应"]
+        direction TB
+        AS1["ChatCompletionsResponseChunk 流"]:::oai
+        AS2["Chunk 状态机<br/>块类型切换 / 索引递进"]:::step
+        AS3["事件映射<br/>content → text_delta<br/>reasoning → thinking_delta<br/>tool_calls → input_json_delta"]:::step
+        AS4["MessagesResponseChunk"]:::anth
+    end
+
+    Q1 --> Q2 --> Q3 --> Q4 --> Q5
+    AR1 --> AR2 --> AR3 --> AR4
+    AS1 --> AS2 --> AS3 --> AS4
+
+    style RQ fill:#f8fafc,stroke:#d07354,stroke-width:2px
+    style RS3 fill:#f8fafc,stroke:#d07354,stroke-width:2px
+    style RS4 fill:#f8fafc,stroke:#d07354,stroke-width:2px
+```
 
 ### e2e 测试
 
@@ -292,4 +380,3 @@ py-e2e-tests/
 **严禁商用**，避免对官方服务器造成压力，否则风险自担。
 
 ~~还有deepseek依旧是国一模!!!~~
-

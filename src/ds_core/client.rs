@@ -135,11 +135,13 @@ struct CreateSessionWrapper {
 }
 
 #[derive(Debug, Deserialize)]
-#[allow(dead_code)]
 pub struct UploadFileData {
     pub id: String,
+    #[allow(dead_code)]
     pub status: String,
+    #[allow(dead_code)]
     pub file_name: String,
+    #[allow(dead_code)]
     pub file_size: i64,
 }
 
@@ -149,24 +151,25 @@ pub struct FetchFilesData {
 }
 
 #[derive(Debug, Deserialize)]
-#[allow(dead_code)]
 pub struct FileInfo {
+    #[allow(dead_code)]
     pub id: String,
     pub status: String,
     pub file_name: String,
+    #[allow(dead_code)]
     pub file_size: i64,
     #[serde(default)]
     pub token_usage: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
-#[allow(dead_code)]
 pub struct ChallengeData {
     pub algorithm: String,
     pub challenge: String,
     pub salt: String,
     pub signature: String,
     pub difficulty: i64,
+    #[allow(dead_code)]
     pub expire_after: i64,
     pub expire_at: i64,
     pub target_path: String,

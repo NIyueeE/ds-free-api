@@ -15,3 +15,6 @@ config.toml
 **/tmp.*
 **/tmp_*
 **/tmp
+
+# 呃
+.claude

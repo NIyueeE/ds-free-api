@@ -204,29 +204,8 @@ impl Completions {
             "req={} 创建 session: id={}", request_id, session_id
         );
 
-        // 4. 上传文件：先外部文件，再内部历史文件
+        // 4. 上传文件：先历史文件，再外部文件（对话阅读顺序）
         let mut ref_file_ids: Vec<String> = Vec::new();
-
-        for file in &req.files {
-            match self
-                .upload_and_poll(
-                    &token,
-                    &file.filename,
-                    &file.content_type,
-                    &file.content,
-                    request_id,
-                )
-                .await
-            {
-                Ok(file_id) => ref_file_ids.push(file_id),
-                Err(e) => {
-                    log::warn!(
-                        target: "ds_core::accounts",
-                        "req={} 外部文件上传失败 ({}): {}", request_id, file.filename, e
-                    );
-                }
-            }
-        }
 
         if !history_content.is_empty() {
             match self
@@ -244,6 +223,27 @@ impl Completions {
                     log::warn!(
                         target: "ds_core::accounts",
                         "req={} 历史文件上传失败: {}", request_id, e
+                    );
+                }
+            }
+        }
+
+        for file in &req.files {
+            match self
+                .upload_and_poll(
+                    &token,
+                    &file.filename,
+                    &file.content_type,
+                    &file.content,
+                    request_id,
+                )
+                .await
+            {
+                Ok(file_id) => ref_file_ids.push(file_id),
+                Err(e) => {
+                    log::warn!(
+                        target: "ds_core::accounts",
+                        "req={} 外部文件上传失败 ({}): {}", request_id, file.filename, e
                     );
                 }
             }

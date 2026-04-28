@@ -490,7 +490,7 @@ pub struct Usage {
 
 /// 模型列表项
 #[derive(Debug, Serialize)]
-pub struct Model {
+pub struct OpenAIModel {
     pub id: String,
     pub object: &'static str,
     pub created: u64,
@@ -520,9 +520,9 @@ pub struct Model {
 
 /// 模型列表响应
 #[derive(Debug, Serialize)]
-pub struct ModelList {
+pub struct OpenAIModelList {
     pub object: &'static str,
-    pub data: Vec<Model>,
+    pub data: Vec<OpenAIModel>,
 }
 
 /// 音频响应对象

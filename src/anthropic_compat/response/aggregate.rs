@@ -1,22 +1,15 @@
-//! 非流式响应映射 —— 将 OpenAI ChatCompletion JSON 映射为 Anthropic Message JSON
+//! 非流式响应映射 —— 将 ChatCompletionsResponse 映射为 MessagesResponse
 
 use log::debug;
 
-use super::{
-    ContentBlock, Message, OpenAiCompletion, OpenAiToolCall, Usage, finish_reason_map, map_id,
-};
+use super::{ContentBlock, finish_reason_map, map_id};
+use crate::anthropic_compat::types::{MessagesResponse, Usage};
+use crate::openai_adapter::types::{ChatCompletionsResponse, ToolCall};
 
-/// 将 OpenAI ChatCompletion JSON 映射为 Anthropic Message JSON
-pub fn from_chat_completion_bytes(openai_json: &[u8]) -> Result<Vec<u8>, serde_json::Error> {
+/// 将 OpenAI ChatCompletionsResponse 直接映射为 MessagesResponse
+pub fn from_chat_completions(resp: &ChatCompletionsResponse) -> MessagesResponse {
     debug!(target: "anthropic_compat::response::aggregate", "开始映射非流式响应");
-    let openai: OpenAiCompletion = serde_json::from_slice(openai_json)?;
-    let msg = map_completion(&openai);
-    debug!(target: "anthropic_compat::response::aggregate", "映射完成: content_blocks={}", msg.content.len());
-    serde_json::to_vec(&msg)
-}
-
-fn map_completion(openai: &OpenAiCompletion) -> Message {
-    let choice = openai.choices.first();
+    let choice = resp.choices.first();
     let message = choice.map(|c| &c.message);
 
     let mut content: Vec<ContentBlock> = Vec::new();
@@ -47,11 +40,9 @@ fn map_completion(openai: &OpenAiCompletion) -> Message {
         }
     }
 
-    let stop_reason = choice
-        .and_then(|c| c.finish_reason.as_deref())
-        .map(finish_reason_map);
+    let stop_reason = choice.and_then(|c| c.finish_reason).map(finish_reason_map);
 
-    let usage = openai
+    let usage = resp
         .usage
         .as_ref()
         .map(|u| Usage {
@@ -63,11 +54,12 @@ fn map_completion(openai: &OpenAiCompletion) -> Message {
             output_tokens: 0,
         });
 
-    Message {
-        id: map_id(&openai.id),
+    debug!(target: "anthropic_compat::response::aggregate", "映射完成: content_blocks={}", content.len());
+    MessagesResponse {
+        id: map_id(&resp.id),
         ty: "message",
         role: "assistant",
-        model: openai.model.clone(),
+        model: resp.model.clone(),
         content,
         stop_reason,
         stop_sequence: None,
@@ -75,7 +67,7 @@ fn map_completion(openai: &OpenAiCompletion) -> Message {
     }
 }
 
-fn tool_call_name(call: &OpenAiToolCall) -> String {
+fn tool_call_name(call: &ToolCall) -> String {
     call.function
         .as_ref()
         .map(|f| f.name.clone())
@@ -83,14 +75,11 @@ fn tool_call_name(call: &OpenAiToolCall) -> String {
         .unwrap_or_default()
 }
 
-fn parse_tool_call_input(call: &OpenAiToolCall) -> serde_json::Value {
+fn parse_tool_call_input(call: &ToolCall) -> serde_json::Value {
     if let Some(ref func) = call.function {
-        serde_json::from_str(&func.arguments).unwrap_or_else(|_| serde_json::json!({}))
+        serde_json::from_str(&func.arguments).unwrap_or(serde_json::json!({}))
     } else if let Some(ref custom) = call.custom {
-        custom
-            .input
-            .clone()
-            .unwrap_or_else(|| serde_json::json!({}))
+        custom.input.clone().unwrap_or(serde_json::json!({}))
     } else {
         serde_json::json!({})
     }
@@ -98,218 +87,246 @@ fn parse_tool_call_input(call: &OpenAiToolCall) -> serde_json::Value {
 
 #[cfg(test)]
 mod tests {
+    use crate::anthropic_compat::types::ResponseContentBlock;
+    use crate::openai_adapter::types::{
+        ChatCompletionsResponse, Choice, FunctionCall, MessageResponse, ToolCall, Usage,
+    };
+
     use super::*;
+
+    fn resp(
+        id: &str,
+        model: &str,
+        content: Option<&str>,
+        reasoning: Option<&str>,
+        tool_calls: Option<Vec<ToolCall>>,
+        finish_reason: Option<&'static str>,
+        usage: Option<Usage>,
+    ) -> ChatCompletionsResponse {
+        let message_content = match content {
+            Some(c) if !c.is_empty() => Some(c.to_string()),
+            _ => None,
+        };
+        ChatCompletionsResponse {
+            id: id.to_string(),
+            object: "chat.completion",
+            created: 1713700000,
+            model: model.to_string(),
+            choices: vec![Choice {
+                index: 0,
+                message: MessageResponse {
+                    role: "assistant",
+                    content: message_content,
+                    reasoning_content: reasoning.map(|s| s.to_string()),
+                    refusal: None,
+                    annotations: None,
+                    audio: None,
+                    function_call: None,
+                    tool_calls,
+                },
+                finish_reason,
+                logprobs: None,
+            }],
+            usage,
+            service_tier: None,
+            system_fingerprint: None,
+        }
+    }
 
     #[test]
     fn plain_text_response() {
-        let openai_json = br#"{
-            "id": "chatcmpl-1",
-            "object": "chat.completion",
-            "created": 1713700000,
-            "model": "deepseek-default",
-            "choices": [{
-                "index": 0,
-                "message": {
-                    "role": "assistant",
-                    "content": "hello world"
-                },
-                "finish_reason": "stop"
-            }],
-            "usage": { "prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15 }
-        }"#;
-
-        let bytes = from_chat_completion_bytes(openai_json).unwrap();
-        let msg: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-
-        assert_eq!(msg["type"], "message");
-        assert_eq!(msg["role"], "assistant");
-        assert_eq!(msg["id"], "msg_1");
-        assert_eq!(msg["model"], "deepseek-default");
-        assert_eq!(msg["stop_reason"], "end_turn");
-        assert_eq!(msg["usage"]["input_tokens"], 10);
-        assert_eq!(msg["usage"]["output_tokens"], 5);
-        assert_eq!(msg["content"].as_array().unwrap().len(), 1);
-        assert_eq!(msg["content"][0]["type"], "text");
-        assert_eq!(msg["content"][0]["text"], "hello world");
+        let r = resp(
+            "chatcmpl-1",
+            "deepseek-default",
+            Some("hello world"),
+            None,
+            None,
+            Some("stop"),
+            Some(Usage {
+                prompt_tokens: 10,
+                completion_tokens: 5,
+                total_tokens: 15,
+                prompt_tokens_details: None,
+                completion_tokens_details: None,
+            }),
+        );
+        let msg = from_chat_completions(&r);
+        assert_eq!(msg.ty, "message");
+        assert_eq!(msg.role, "assistant");
+        assert_eq!(msg.id, "msg_1");
+        assert_eq!(msg.model, "deepseek-default");
+        assert_eq!(msg.stop_reason, Some("end_turn".to_string()));
+        assert_eq!(msg.usage.input_tokens, 10);
+        assert_eq!(msg.usage.output_tokens, 5);
+        assert_eq!(msg.content.len(), 1);
+        assert!(matches!(msg.content[0], ResponseContentBlock::Text { .. }));
     }
 
     #[test]
     fn thinking_and_text_response() {
-        let openai_json = br#"{
-            "id": "chatcmpl-2",
-            "model": "deepseek-expert",
-            "choices": [{
-                "message": {
-                    "role": "assistant",
-                    "content": "The answer is 42.",
-                    "reasoning_content": "Let me think..."
-                },
-                "finish_reason": "stop"
-            }],
-            "usage": { "prompt_tokens": 20, "completion_tokens": 10 }
-        }"#;
-
-        let bytes = from_chat_completion_bytes(openai_json).unwrap();
-        let msg: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-
-        assert_eq!(msg["content"].as_array().unwrap().len(), 2);
-        assert_eq!(msg["content"][0]["type"], "thinking");
-        assert_eq!(msg["content"][0]["thinking"], "Let me think...");
-        assert_eq!(msg["content"][1]["type"], "text");
-        assert_eq!(msg["content"][1]["text"], "The answer is 42.");
+        let r = resp(
+            "chatcmpl-2",
+            "deepseek-expert",
+            Some("The answer is 42."),
+            Some("Let me think..."),
+            None,
+            Some("stop"),
+            Some(Usage {
+                prompt_tokens: 20,
+                completion_tokens: 10,
+                total_tokens: 30,
+                prompt_tokens_details: None,
+                completion_tokens_details: None,
+            }),
+        );
+        let msg = from_chat_completions(&r);
+        assert_eq!(msg.content.len(), 2);
+        assert!(matches!(
+            msg.content[0],
+            ResponseContentBlock::Thinking { .. }
+        ));
+        assert!(matches!(msg.content[1], ResponseContentBlock::Text { .. }));
+        if let ResponseContentBlock::Thinking { ref thinking, .. } = msg.content[0] {
+            assert_eq!(thinking, "Let me think...");
+        }
+        if let ResponseContentBlock::Text { ref text } = msg.content[1] {
+            assert_eq!(text, "The answer is 42.");
+        }
     }
 
     #[test]
-    fn tool_calls_response() {
-        let openai_json = br#"{
-            "id": "chatcmpl-3",
-            "model": "deepseek-default",
-            "choices": [{
-                "message": {
-                    "role": "assistant",
-                    "content": "",
-                    "tool_calls": [{
-                        "id": "call_abc",
-                        "type": "function",
-                        "function": {
-                            "name": "get_weather",
-                            "arguments": "{\"city\":\"Beijing\"}"
-                        }
-                    }]
-                },
-                "finish_reason": "tool_calls"
-            }],
-            "usage": { "prompt_tokens": 15, "completion_tokens": 8 }
-        }"#;
+    fn tool_calls_with_and_without_text() {
+        let make_call = |content: &str, _expected_len: usize| {
+            let tool_calls = Some(vec![ToolCall {
+                id: "call_abc".to_string(),
+                ty: "function".to_string(),
+                function: Some(FunctionCall {
+                    name: "get_weather".to_string(),
+                    arguments: r#"{"city":"Beijing"}"#.to_string(),
+                }),
+                custom: None,
+                index: 0,
+            }]);
+            let content_opt = if content.is_empty() {
+                None
+            } else {
+                Some(content)
+            };
+            let r = resp(
+                "chatcmpl-x",
+                "deepseek-default",
+                content_opt,
+                None,
+                tool_calls,
+                Some("tool_calls"),
+                Some(Usage {
+                    prompt_tokens: 15,
+                    completion_tokens: 8,
+                    total_tokens: 23,
+                    prompt_tokens_details: None,
+                    completion_tokens_details: None,
+                }),
+            );
+            from_chat_completions(&r)
+        };
 
-        let bytes = from_chat_completion_bytes(openai_json).unwrap();
-        let msg: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let msg = make_call("", 1);
+        assert_eq!(msg.content.len(), 1);
+        assert!(matches!(
+            msg.content[0],
+            ResponseContentBlock::ToolUse { .. }
+        ));
 
-        assert_eq!(msg["stop_reason"], "tool_use");
-        assert_eq!(msg["content"].as_array().unwrap().len(), 1);
-        assert_eq!(msg["content"][0]["type"], "tool_use");
-        assert_eq!(msg["content"][0]["id"], "toolu_abc");
-        assert_eq!(msg["content"][0]["name"], "get_weather");
-        assert_eq!(msg["content"][0]["input"]["city"], "Beijing");
+        let msg = make_call("Let me check the weather", 2);
+        assert_eq!(msg.content.len(), 2);
+        assert!(matches!(msg.content[0], ResponseContentBlock::Text { .. }));
+        assert!(matches!(
+            msg.content[1],
+            ResponseContentBlock::ToolUse { .. }
+        ));
+        if let ResponseContentBlock::ToolUse { ref input, .. } =
+            msg.content[usize::from(msg.content.len() - 1)]
+        {
+            assert_eq!(input["city"], "Beijing");
+        }
     }
 
     #[test]
-    fn text_and_tool_calls_response() {
-        let openai_json = br#"{
-            "id": "chatcmpl-4",
-            "model": "deepseek-default",
-            "choices": [{
-                "message": {
-                    "role": "assistant",
-                    "content": "Let me check the weather",
-                    "tool_calls": [{
-                        "id": "call_def",
-                        "type": "function",
-                        "function": {
-                            "name": "get_weather",
-                            "arguments": "{}"
-                        }
-                    }]
-                },
-                "finish_reason": "tool_calls"
-            }],
-            "usage": { "prompt_tokens": 12, "completion_tokens": 6 }
-        }"#;
+    fn empty_or_missing_content() {
+        let r1 = resp(
+            "x",
+            "m",
+            Some(""),
+            None,
+            None,
+            Some("stop"),
+            Some(Usage {
+                prompt_tokens: 5,
+                completion_tokens: 1,
+                total_tokens: 6,
+                prompt_tokens_details: None,
+                completion_tokens_details: None,
+            }),
+        );
+        assert!(from_chat_completions(&r1).content.is_empty());
 
-        let bytes = from_chat_completion_bytes(openai_json).unwrap();
-        let msg: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-
-        assert_eq!(msg["content"].as_array().unwrap().len(), 2);
-        assert_eq!(msg["content"][0]["type"], "text");
-        assert_eq!(msg["content"][0]["text"], "Let me check the weather");
-        assert_eq!(msg["content"][1]["type"], "tool_use");
-        assert_eq!(msg["content"][1]["name"], "get_weather");
-    }
-
-    #[test]
-    fn empty_content_skipped() {
-        let openai_json = br#"{
-            "id": "chatcmpl-5",
-            "model": "deepseek-default",
-            "choices": [{
-                "message": {
-                    "role": "assistant",
-                    "content": ""
-                },
-                "finish_reason": "stop"
-            }],
-            "usage": { "prompt_tokens": 5, "completion_tokens": 1 }
-        }"#;
-
-        let bytes = from_chat_completion_bytes(openai_json).unwrap();
-        let msg: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-
-        assert!(msg["content"].as_array().unwrap().is_empty());
-    }
-
-    #[test]
-    fn null_content_handled() {
-        let openai_json = br#"{
-            "id": "chatcmpl-6",
-            "model": "deepseek-default",
-            "choices": [{
-                "message": {
-                    "role": "assistant"
-                },
-                "finish_reason": "stop"
-            }],
-            "usage": null
-        }"#;
-
-        let bytes = from_chat_completion_bytes(openai_json).unwrap();
-        let msg: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-
-        assert!(msg["content"].as_array().unwrap().is_empty());
-        assert_eq!(msg["usage"]["input_tokens"], 0);
-        assert_eq!(msg["usage"]["output_tokens"], 0);
+        let r2 = resp("x", "m", None, None, None, Some("stop"), None);
+        assert!(from_chat_completions(&r2).content.is_empty());
     }
 
     #[test]
     fn malformed_arguments_fallback_to_empty_object() {
-        let openai_json = br#"{
-            "id": "chatcmpl-7",
-            "model": "deepseek-default",
-            "choices": [{
-                "message": {
-                    "role": "assistant",
-                    "tool_calls": [{
-                        "id": "call_bad",
-                        "type": "function",
-                        "function": {
-                            "name": "foo",
-                            "arguments": "not-json"
-                        }
-                    }]
-                },
-                "finish_reason": "tool_calls"
-            }],
-            "usage": { "prompt_tokens": 5, "completion_tokens": 3 }
-        }"#;
-
-        let bytes = from_chat_completion_bytes(openai_json).unwrap();
-        let msg: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-
-        assert_eq!(msg["content"][0]["input"], serde_json::json!({}));
+        let tool_calls = Some(vec![ToolCall {
+            id: "call_bad".to_string(),
+            ty: "function".to_string(),
+            function: Some(FunctionCall {
+                name: "foo".to_string(),
+                arguments: "not-json".to_string(),
+            }),
+            custom: None,
+            index: 0,
+        }]);
+        let r = resp(
+            "chatcmpl-7",
+            "deepseek-default",
+            None,
+            None,
+            tool_calls,
+            Some("tool_calls"),
+            Some(Usage {
+                prompt_tokens: 5,
+                completion_tokens: 3,
+                total_tokens: 8,
+                prompt_tokens_details: None,
+                completion_tokens_details: None,
+            }),
+        );
+        let msg = from_chat_completions(&r);
+        if let ResponseContentBlock::ToolUse { ref input, .. } = msg.content[0] {
+            assert_eq!(input, &serde_json::json!({}));
+        }
     }
 
     #[test]
     fn no_choices_empty_content() {
-        let openai_json = br#"{
-            "id": "chatcmpl-empty",
-            "model": "deepseek-default",
-            "choices": [],
-            "usage": { "prompt_tokens": 0, "completion_tokens": 0 }
-        }"#;
-
-        let bytes = from_chat_completion_bytes(openai_json).unwrap();
-        let msg: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-
-        assert!(msg["content"].as_array().unwrap().is_empty());
-        assert_eq!(msg["stop_reason"], serde_json::Value::Null);
+        let r = ChatCompletionsResponse {
+            id: "chatcmpl-empty".to_string(),
+            object: "chat.completion",
+            created: 0,
+            model: "deepseek-default".to_string(),
+            choices: vec![],
+            usage: Some(Usage {
+                prompt_tokens: 0,
+                completion_tokens: 0,
+                total_tokens: 0,
+                prompt_tokens_details: None,
+                completion_tokens_details: None,
+            }),
+            service_tier: None,
+            system_fingerprint: None,
+        };
+        let msg = from_chat_completions(&r);
+        assert!(msg.content.is_empty());
+        assert_eq!(msg.stop_reason, None);
     }
 }

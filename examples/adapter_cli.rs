@@ -123,8 +123,17 @@ async fn handle_line(line: &str, adapter: &OpenAIAdapter) -> anyhow::Result<bool
             let result = adapter.chat_completions(req, &rid).await?;
             println!("[account: {}]", result.account_id);
             match result.data {
-                ChatOutput::Stream { stream: mut s, .. } => print_stream(&mut s, false).await,
-                ChatOutput::Json(json) => println!("{}", String::from_utf8_lossy(&json)),
+                ChatOutput::Stream(mut s) => {
+                    use futures::StreamExt;
+                    // ChunkStream → print each chunk as JSON line
+                    while let Some(chunk) = s.next().await {
+                        match chunk {
+                            Ok(c) => println!("{}", serde_json::to_string(&c).unwrap()),
+                            Err(e) => eprintln!("流错误: {}", e),
+                        }
+                    }
+                }
+                ChatOutput::Json(json) => println!("{}", serde_json::to_string(&json).unwrap()),
             }
         }
 
@@ -133,7 +142,7 @@ async fn handle_line(line: &str, adapter: &OpenAIAdapter) -> anyhow::Result<bool
             let body = load_json(file)?;
             let rid = demo_req_id();
             println!(">>> raw: {} [req={}]", file, rid);
-            let mut result = adapter.raw_chat_stream(&body, &rid).await?;
+            let mut result = adapter.raw_chat_completions_stream(&body, &rid).await?;
             println!("[account: {}]", result.account_id);
             print_stream(&mut result.data, true).await;
         }
@@ -149,7 +158,7 @@ async fn handle_line(line: &str, adapter: &OpenAIAdapter) -> anyhow::Result<bool
                 "\n═══ RAW DEEPSEEK SSE [req={}] ═════════════════════════════════",
                 rid1
             );
-            let raw_result = adapter.raw_chat_stream(&body, &rid1).await?;
+            let raw_result = adapter.raw_chat_completions_stream(&body, &rid1).await?;
             println!("[account: {}]", raw_result.account_id);
             consume_stream(raw_result.data, |bytes| {
                 let text = String::from_utf8_lossy(&bytes);
@@ -169,15 +178,11 @@ async fn handle_line(line: &str, adapter: &OpenAIAdapter) -> anyhow::Result<bool
             let converted_result = adapter.chat_completions(conv_req, &rid2).await?;
             println!("[account: {}]", converted_result.account_id);
             match converted_result.data {
-                ChatOutput::Stream { stream: mut s, .. } => {
+                ChatOutput::Stream(mut s) => {
+                    use futures::StreamExt;
                     while let Some(chunk) = s.next().await {
                         match chunk {
-                            Ok(bytes) => {
-                                let text = String::from_utf8_lossy(&bytes);
-                                for line in text.lines() {
-                                    println!("  {}", line);
-                                }
-                            }
+                            Ok(c) => println!("  {}", serde_json::to_string(&c).unwrap()),
                             Err(e) => eprintln!("流错误: {}", e),
                         }
                     }
@@ -204,13 +209,13 @@ async fn handle_line(line: &str, adapter: &OpenAIAdapter) -> anyhow::Result<bool
         }
 
         "models" => {
-            let json = adapter.list_models();
-            println!("{}", String::from_utf8_lossy(&json));
+            let list = adapter.list_models();
+            println!("{}", serde_json::to_string(&list).unwrap());
         }
 
         "model" if parts.len() == 2 => {
-            if let Some(json) = adapter.get_model(parts[1]) {
-                println!("{}", String::from_utf8_lossy(&json));
+            if let Some(model) = adapter.get_model(parts[1]) {
+                println!("{}", serde_json::to_string(&model).unwrap());
             } else {
                 println!("null");
             }
@@ -389,42 +394,25 @@ async fn run_concurrent(adapter: &OpenAIAdapter, count: usize, body: Vec<u8>, ra
                 };
 
                 let (ok, output) = match result.data {
-                    ChatOutput::Stream { mut stream, .. } => {
+                    ChatOutput::Stream(mut s) => {
+                        use futures::StreamExt;
                         let mut output = String::new();
                         let mut ok = true;
-                        while let Some(chunk) = stream.next().await {
+                        while let Some(chunk) = s.next().await {
                             match chunk {
-                                Ok(bytes) => {
+                                Ok(c) => {
                                     if raw {
-                                        output.push_str(&String::from_utf8_lossy(&bytes));
-                                    } else {
-                                        let text = String::from_utf8_lossy(&bytes);
-                                        let json_str = text
-                                            .strip_prefix("data: ")
-                                            .and_then(|s| s.strip_suffix("\n\n"))
-                                            .unwrap_or(&text);
-                                        if let Ok(v) =
-                                            serde_json::from_str::<serde_json::Value>(json_str)
+                                        output.push_str(&serde_json::to_string(&c).unwrap());
+                                    } else if let Some(choice) = c.choices.first() {
+                                        if let Some(ref content) = choice.delta.content {
+                                            output.push_str(content);
+                                        }
+                                        if let Some(ref reasoning) = choice.delta.reasoning_content
                                         {
-                                            let delta = v
-                                                .get("choices")
-                                                .and_then(|c| c.get(0))
-                                                .and_then(|c| c.get("delta"));
-                                            if let Some(c) = delta
-                                                .and_then(|d| d.get("content"))
-                                                .and_then(|c| c.as_str())
-                                            {
-                                                output.push_str(c);
+                                            if !output.is_empty() {
+                                                output.push(' ');
                                             }
-                                            if let Some(r) = delta
-                                                .and_then(|d| d.get("reasoning_content"))
-                                                .and_then(|c| c.as_str())
-                                            {
-                                                if !output.is_empty() {
-                                                    output.push(' ');
-                                                }
-                                                output.push_str(r);
-                                            }
+                                            output.push_str(reasoning);
                                         }
                                     }
                                 }
@@ -439,26 +427,20 @@ async fn run_concurrent(adapter: &OpenAIAdapter, count: usize, body: Vec<u8>, ra
                     }
                     ChatOutput::Json(json) => {
                         let output = if raw {
-                            String::from_utf8_lossy(&json).to_string()
+                            serde_json::to_string(&json).unwrap_or_default()
                         } else {
-                            let v: serde_json::Value =
-                                serde_json::from_slice(&json).unwrap_or_default();
                             let mut parts = Vec::new();
-                            if let Some(c) = v
-                                .get("choices")
-                                .and_then(|c| c.get(0))
-                                .and_then(|c| c.get("message"))
-                                .and_then(|m| m.get("content"))
-                                .and_then(|c| c.as_str())
+                            if let Some(c) = json
+                                .choices
+                                .first()
+                                .and_then(|c| c.message.content.as_deref())
                             {
                                 parts.push(c.to_string());
                             }
-                            if let Some(r) = v
-                                .get("choices")
-                                .and_then(|c| c.get(0))
-                                .and_then(|c| c.get("message"))
-                                .and_then(|m| m.get("reasoning_content"))
-                                .and_then(|c| c.as_str())
+                            if let Some(r) = json
+                                .choices
+                                .first()
+                                .and_then(|c| c.message.reasoning_content.as_deref())
                             {
                                 parts.push(r.to_string());
                             }

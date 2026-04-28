@@ -13,7 +13,8 @@ use axum::{
 };
 use bytes::Bytes;
 
-use crate::anthropic_compat::{AnthropicCompat, AnthropicOutput};
+use crate::anthropic_compat::types::MessagesRequest;
+use crate::anthropic_compat::{AnthropicCompat, AnthropicCompatError, AnthropicOutput};
 use crate::openai_adapter::{
     ChatCompletionsRequest, ChatOutput, OpenAIAdapter, OpenAIAdapterError,
 };
@@ -48,20 +49,21 @@ pub(crate) async fn chat_completions(
 
     let result = state.adapter.chat_completions(req, &request_id).await?;
     match result.data {
-        ChatOutput::Stream { stream, .. } => {
+        ChatOutput::Stream(stream) => {
+            let sse = crate::openai_adapter::response::sse_stream(stream);
             log::debug!(target: "http::response", "req={} 200 SSE stream started", request_id);
-            Ok(SseBody::new(stream)
+            Ok(SseBody::new(sse)
                 .with_header(X_DS_ACCOUNT, &result.account_id)
                 .into_response())
         }
         ChatOutput::Json(json) => {
-            log::debug!(target: "http::response", "req={} 200 JSON response {} bytes", request_id, json.len());
-            let body = Body::from(json);
+            let bytes = serde_json::to_vec(&json).unwrap();
+            log::debug!(target: "http::response", "req={} 200 JSON response {} bytes", request_id, bytes.len());
             Ok(Response::builder()
                 .status(StatusCode::OK)
                 .header(header::CONTENT_TYPE, "application/json")
                 .header(X_DS_ACCOUNT, &result.account_id)
-                .body(body)
+                .body(Body::from(bytes))
                 .unwrap()
                 .into_response())
         }
@@ -71,12 +73,12 @@ pub(crate) async fn chat_completions(
 /// GET /v1/models
 pub(crate) async fn list_models(State(state): State<AppState>) -> Response {
     log::debug!(target: "http::request", "GET /v1/models");
-    let json = state.adapter.list_models();
-    log::debug!(target: "http::response", "200 JSON response {} bytes", json.len());
+    let bytes = serde_json::to_vec(&state.adapter.list_models()).unwrap();
+    log::debug!(target: "http::response", "200 JSON response {} bytes", bytes.len());
     (
         StatusCode::OK,
         [(header::CONTENT_TYPE, "application/json")],
-        Body::from(json),
+        Body::from(bytes),
     )
         .into_response()
 }
@@ -89,12 +91,13 @@ pub(crate) async fn get_model(
     log::debug!(target: "http::request", "GET /v1/models/{}", id);
 
     match state.adapter.get_model(&id) {
-        Some(json) => {
-            log::debug!(target: "http::response", "200 JSON response {} bytes", json.len());
+        Some(model) => {
+            let bytes = serde_json::to_vec(&model).unwrap();
+            log::debug!(target: "http::response", "200 JSON response {} bytes", bytes.len());
             Ok((
                 StatusCode::OK,
                 [(header::CONTENT_TYPE, "application/json")],
-                Body::from(json),
+                Body::from(bytes),
             )
                 .into_response())
         }
@@ -114,22 +117,33 @@ pub(crate) async fn anthropic_messages(
     let request_id = next_request_id();
     log::debug!(target: "http::request", "req={} anthropic body: {}", request_id, String::from_utf8_lossy(&body));
 
-    let result = state.anthropic_compat.messages(&body, &request_id).await?;
+    let req: MessagesRequest = serde_json::from_slice(&body)
+        .map_err(|e| AnthropicCompatError::BadRequest(format!("bad request: {}", e)))?;
+    log::debug!(target: "http::request", "req={} POST /anthropic/v1/messages stream={}", request_id, req.stream);
+
+    let result = state.anthropic_compat.messages(req, &request_id).await?;
     match result.data {
         AnthropicOutput::Stream(stream) => {
+            use futures::StreamExt;
+            let sse = stream.map(|chunk| match chunk {
+                Ok(c) => c
+                    .to_sse_bytes()
+                    .map_err(|e| AnthropicCompatError::Internal(e.to_string())),
+                Err(e) => Err(e),
+            });
             log::debug!(target: "http::response", "req={} 200 SSE stream started", request_id);
-            Ok(SseBody::new(stream)
+            Ok(SseBody::new(sse)
                 .with_header(X_DS_ACCOUNT, &result.account_id)
                 .into_response())
         }
         AnthropicOutput::Json(json) => {
-            log::debug!(target: "http::response", "req={} 200 JSON response {} bytes", request_id, json.len());
-            let body = Body::from(json);
+            let bytes = serde_json::to_vec(&json).unwrap();
+            log::debug!(target: "http::response", "req={} 200 JSON response {} bytes", request_id, bytes.len());
             Ok(Response::builder()
                 .status(StatusCode::OK)
                 .header(header::CONTENT_TYPE, "application/json")
                 .header(X_DS_ACCOUNT, &result.account_id)
-                .body(body)
+                .body(Body::from(bytes))
                 .unwrap()
                 .into_response())
         }
@@ -139,12 +153,12 @@ pub(crate) async fn anthropic_messages(
 /// GET /anthropic/v1/models
 pub(crate) async fn anthropic_list_models(State(state): State<AppState>) -> Response {
     log::debug!(target: "http::request", "GET /anthropic/v1/models");
-    let json = state.anthropic_compat.list_models();
-    log::debug!(target: "http::response", "200 JSON response {} bytes", json.len());
+    let bytes = serde_json::to_vec(&state.anthropic_compat.list_models()).unwrap();
+    log::debug!(target: "http::response", "200 JSON response {} bytes", bytes.len());
     (
         StatusCode::OK,
         [(header::CONTENT_TYPE, "application/json")],
-        Body::from(json),
+        Body::from(bytes),
     )
         .into_response()
 }
@@ -157,12 +171,13 @@ pub(crate) async fn anthropic_get_model(
     log::debug!(target: "http::request", "GET /anthropic/v1/models/{}", id);
 
     match state.anthropic_compat.get_model(&id) {
-        Some(json) => {
-            log::debug!(target: "http::response", "200 JSON response {} bytes", json.len());
+        Some(model) => {
+            let bytes = serde_json::to_vec(&model).unwrap();
+            log::debug!(target: "http::response", "200 JSON response {} bytes", bytes.len());
             Ok((
                 StatusCode::OK,
                 [(header::CONTENT_TYPE, "application/json")],
-                Body::from(json),
+                Body::from(bytes),
             )
                 .into_response())
         }

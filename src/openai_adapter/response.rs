@@ -60,23 +60,10 @@ fn random_padding(len: usize) -> String {
     s[..len].to_string()
 }
 
-fn chunk_to_bytes(
-    mut chunk: ChatCompletionsResponseChunk,
-    include_obfuscation: bool,
+pub(crate) fn sse_serialize(
+    chunk: &ChatCompletionsResponseChunk,
 ) -> Result<Bytes, OpenAIAdapterError> {
-    if include_obfuscation && !chunk.choices.is_empty() {
-        let without = serde_json::to_string(&chunk).map_err(OpenAIAdapterError::from)?;
-        let overhead = r#","obfuscation":"""#.len();
-        let pad_len = if without.len() + overhead < OBFUSCATION_TARGET_LEN {
-            OBFUSCATION_TARGET_LEN - without.len() - overhead
-        } else {
-            OBFUSCATION_MIN_PAD
-        };
-        if let Some(choice) = chunk.choices.first_mut() {
-            choice.delta.obfuscation = Some(random_padding(pad_len));
-        }
-    }
-    let json_text = serde_json::to_string(&chunk).map_err(OpenAIAdapterError::from)?;
+    let json_text = serde_json::to_string(chunk).map_err(OpenAIAdapterError::from)?;
     Ok(Bytes::from(format!("data: {}\n\n", json_text)))
 }
 
@@ -149,7 +136,7 @@ enum RepairState {
 }
 
 pin_project! {
-    /// 工具调用修复流：在 ToolCallStream 之后、StopStream 之前
+    /// 工具调用修复流：在 ToolCallStream 之后、StopDetectStream 之前
     ///
     /// 当 ToolCallStream 返回 Err(ToolCallRepairNeeded) 时，
     /// 丢弃上游流（释放账号），通过 repair_fn 发起修复请求，
@@ -256,7 +243,7 @@ impl Stream for RepairStream {
 }
 
 pin_project! {
-    struct StopStream<S> {
+    struct StopDetectStream<S> {
         #[pin]
         inner: S,
         stop: Vec<String>,
@@ -267,11 +254,11 @@ pin_project! {
     }
 }
 
-impl<S> Stream for StopStream<S>
+impl<S> Stream for StopDetectStream<S>
 where
     S: Stream<Item = Result<ChatCompletionsResponseChunk, OpenAIAdapterError>>,
 {
-    type Item = Result<Bytes, OpenAIAdapterError>;
+    type Item = Result<ChatCompletionsResponseChunk, OpenAIAdapterError>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let mut this = self.project();
@@ -282,10 +269,7 @@ where
                 Poll::Ready(Some(Ok(mut chunk))) => {
                     if *this.stopped {
                         if chunk.choices.is_empty() && chunk.usage.is_some() {
-                            return Poll::Ready(Some(chunk_to_bytes(
-                                chunk,
-                                *this.include_obfuscation,
-                            )));
+                            return Poll::Ready(Some(Ok(chunk)));
                         }
                         // 允许 finish_reason 从 stop 升级为 tool_calls
                         if let Some(choice) = chunk.choices.first_mut()
@@ -294,10 +278,7 @@ where
                             && choice.delta.tool_calls.is_none()
                             && choice.finish_reason == Some(FINISH_TOOL_CALLS)
                         {
-                            return Poll::Ready(Some(chunk_to_bytes(
-                                chunk,
-                                *this.include_obfuscation,
-                            )));
+                            return Poll::Ready(Some(Ok(chunk)));
                         }
                         continue;
                     }
@@ -322,7 +303,20 @@ where
                             *this.sent_len = this.buffer.len();
                         }
                     }
-                    return Poll::Ready(Some(chunk_to_bytes(chunk, *this.include_obfuscation)));
+                    if *this.include_obfuscation && !chunk.choices.is_empty() {
+                        let without = serde_json::to_string(&chunk)
+                            .map_err(|e| OpenAIAdapterError::Internal(format!("json: {}", e)))?;
+                        let overhead = r#","obfuscation":"""#.len();
+                        let pad_len = if without.len() + overhead < OBFUSCATION_TARGET_LEN {
+                            OBFUSCATION_TARGET_LEN - without.len() - overhead
+                        } else {
+                            OBFUSCATION_MIN_PAD
+                        };
+                        if let Some(choice) = chunk.choices.first_mut() {
+                            choice.delta.obfuscation = Some(random_padding(pad_len));
+                        }
+                    }
+                    return Poll::Ready(Some(Ok(chunk)));
                 }
                 Poll::Pending => return Poll::Pending,
             }
@@ -330,7 +324,7 @@ where
     }
 }
 
-/// 流式响应：把 ds_core 字节流转换为 OpenAI SSE 字节流
+/// 流式响应：把 ds_core 字节流转换为 ChatCompletionsResponseChunk 流
 pub(crate) fn stream<S>(
     ds_stream: S,
     model: String,
@@ -339,7 +333,7 @@ pub(crate) fn stream<S>(
     stop: Vec<String>,
     prompt_tokens: u32,
     repair_fn: Option<RepairFn>,
-) -> StreamResponse
+) -> ChunkStream
 where
     S: Stream<Item = Result<Bytes, crate::ds_core::CoreError>> + Send + 'static,
 {
@@ -370,7 +364,7 @@ where
         tool_boxed
     };
 
-    let stop_stream = StopStream {
+    let stop_detect = StopDetectStream {
         inner: after_repair,
         stop,
         stopped: false,
@@ -378,7 +372,36 @@ where
         buffer: String::new(),
         include_obfuscation,
     };
-    Box::pin(stop_stream)
+    Box::pin(stop_detect)
+}
+
+/// 将 ChunkStream 序列化为 SSE 字节流
+pub(crate) fn sse_stream(inner: ChunkStream) -> StreamResponse {
+    Box::pin(SseSerializer { inner })
+}
+
+pin_project! {
+    struct SseSerializer<S> {
+        #[pin]
+        inner: S,
+    }
+}
+
+impl<S> Stream for SseSerializer<S>
+where
+    S: Stream<Item = Result<ChatCompletionsResponseChunk, OpenAIAdapterError>>,
+{
+    type Item = Result<Bytes, OpenAIAdapterError>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let mut this = self.project();
+        match this.inner.as_mut().poll_next(cx) {
+            Poll::Ready(Some(Ok(chunk))) => Poll::Ready(Some(sse_serialize(&chunk))),
+            Poll::Ready(Some(Err(e))) => Poll::Ready(Some(Err(e))),
+            Poll::Ready(None) => Poll::Ready(None),
+            Poll::Pending => Poll::Pending,
+        }
+    }
 }
 
 /// 非流式响应：stream() 的下游收集器，纯重组无特殊逻辑
@@ -393,14 +416,12 @@ pub(crate) async fn aggregate<S>(
     stop: Vec<String>,
     prompt_tokens: u32,
     repair_fn: Option<RepairFn>,
-) -> Result<Vec<u8>, OpenAIAdapterError>
+) -> Result<ChatCompletionsResponse, OpenAIAdapterError>
 where
     S: Stream<Item = Result<Bytes, crate::ds_core::CoreError>> + Send + 'static,
 {
-    use serde_json::Value;
-
     debug!(target: "adapter", "构建非流式响应: model={}, stop_count={}", model, stop.len());
-    let bytes_stream = stream(
+    let chunk_stream = stream(
         ds_stream,
         model.clone(),
         true,  // include_usage
@@ -409,7 +430,7 @@ where
         prompt_tokens,
         repair_fn,
     );
-    futures::pin_mut!(bytes_stream);
+    futures::pin_mut!(chunk_stream);
 
     let mut id = String::new();
     let mut created = 0u64;
@@ -419,56 +440,38 @@ where
     let mut usage = None;
     let mut finish_reason: Option<&'static str> = None;
 
-    while let Some(res) = bytes_stream.next().await {
-        let bytes = res?;
-        let text = std::str::from_utf8(&bytes)
-            .map_err(|e| OpenAIAdapterError::Internal(format!("UTF-8 error: {e}")))?;
-
-        let body = match text.strip_prefix("data: ") {
-            Some(body) => body,
-            None => continue, // 跳过非 data 行（保活注释等）
-        };
-        let body = body.strip_suffix("\n\n").unwrap_or(body);
-
-        let v: Value = serde_json::from_str(body).map_err(OpenAIAdapterError::from)?;
+    while let Some(res) = chunk_stream.next().await {
+        let chunk = res?;
 
         if id.is_empty() {
-            id = v["id"].as_str().map(String::from).unwrap_or_default();
-            created = v["created"].as_u64().unwrap_or(0);
+            id = chunk.id;
+            created = chunk.created;
         }
 
-        if let Some(u) = v.get("usage") {
+        if let Some(u) = chunk.usage {
             usage = Some(Usage {
-                prompt_tokens: u["prompt_tokens"].as_u64().unwrap_or(0) as u32,
-                completion_tokens: u["completion_tokens"].as_u64().unwrap_or(0) as u32,
-                total_tokens: u["total_tokens"].as_u64().unwrap_or(0) as u32,
+                prompt_tokens: u.prompt_tokens,
+                completion_tokens: u.completion_tokens,
+                total_tokens: u.total_tokens,
                 prompt_tokens_details: None,
                 completion_tokens_details: None,
             });
         }
 
-        if let Some(choices) = v["choices"].as_array()
-            && let Some(choice) = choices.first()
-        {
+        if let Some(choice) = chunk.choices.into_iter().next() {
             if finish_reason.is_none() {
-                finish_reason = choice["finish_reason"].as_str().and_then(|s| match s {
-                    "tool_calls" => Some(FINISH_TOOL_CALLS),
-                    "stop" => Some(FINISH_STOP),
-                    _ => None,
-                });
+                finish_reason = choice.finish_reason;
             }
-            if let Some(c) = choice["delta"]["content"].as_str() {
-                content.push_str(c);
+            if let Some(c) = choice.delta.content {
+                content.push_str(&c);
             }
-            if let Some(r) = choice["delta"]["reasoning_content"].as_str() {
-                reasoning.push_str(r);
+            if let Some(r) = choice.delta.reasoning_content {
+                reasoning.push_str(&r);
             }
-            if let Some(tc) = choice["delta"]["tool_calls"].as_array()
+            if let Some(tc) = choice.delta.tool_calls
                 && !tc.is_empty()
             {
-                tool_calls = Some(serde_json::from_value(
-                    choice["delta"]["tool_calls"].clone(),
-                )?);
+                tool_calls = Some(tc);
             }
         }
     }
@@ -521,7 +524,6 @@ where
         system_fingerprint: None,
     };
 
-    let json = serde_json::to_vec(&completion)?;
     debug!(
         target: "adapter",
         "非流式响应聚合完成: finish_reason={:?}, has_tool_calls={}, usage={:?}",
@@ -529,7 +531,7 @@ where
         completion.choices[0].message.tool_calls.is_some(),
         completion.usage
     );
-    Ok(json)
+    Ok(completion)
 }
 
 #[cfg(test)]
@@ -615,40 +617,28 @@ mod tests {
     async fn aggregate_plain_text() {
         let frames = make_ds_stream(&[("hello world", "RESPONSE")], Some(41));
         let stream = futures::stream::iter(frames);
-        let json = aggregate(stream, "deepseek-default".into(), vec![], 0, None)
+        let resp = aggregate(stream, "deepseek-default".into(), vec![], 0, None)
             .await
             .unwrap();
-        let completion: serde_json::Value = serde_json::from_slice(&json).unwrap();
-        println!("\n=== AGGREGATED RESPONSE (plain_text) ===");
-        println!("{}", serde_json::to_string_pretty(&completion).unwrap());
-        println!("=========================================\n");
-        assert_eq!(completion["object"], "chat.completion");
-        assert_eq!(completion["model"], "deepseek-default");
-        assert_eq!(
-            completion["choices"][0]["message"]["content"],
-            "hello world"
-        );
-        assert_eq!(completion["choices"][0]["finish_reason"], "stop");
-        assert_eq!(completion["usage"]["completion_tokens"], 41);
+        assert_eq!(resp.object, "chat.completion");
+        assert_eq!(resp.model, "deepseek-default");
+        let msg = &resp.choices[0].message;
+        assert_eq!(msg.content.as_deref(), Some("hello world"));
+        assert_eq!(resp.choices[0].finish_reason, Some("stop"));
+        assert_eq!(resp.usage.as_ref().unwrap().completion_tokens, 41);
     }
 
     #[tokio::test]
     async fn aggregate_thinking() {
         let frames = make_ds_stream(&[("thinking", "THINK"), ("answer", "RESPONSE")], None);
         let stream = futures::stream::iter(frames);
-        let json = aggregate(stream, "deepseek-expert".into(), vec![], 0, None)
+        let resp = aggregate(stream, "deepseek-expert".into(), vec![], 0, None)
             .await
             .unwrap();
-        let completion: serde_json::Value = serde_json::from_slice(&json).unwrap();
-        println!("\n=== AGGREGATED RESPONSE (thinking) ===");
-        println!("{}", serde_json::to_string_pretty(&completion).unwrap());
-        println!("=======================================\n");
-        assert_eq!(
-            completion["choices"][0]["message"]["reasoning_content"],
-            "thinking"
-        );
-        assert_eq!(completion["choices"][0]["message"]["content"], "answer");
-        assert_eq!(completion["choices"][0]["finish_reason"], "stop");
+        let msg = &resp.choices[0].message;
+        assert_eq!(msg.reasoning_content.as_deref(), Some("thinking"));
+        assert_eq!(msg.content.as_deref(), Some("answer"));
+        assert_eq!(resp.choices[0].finish_reason, Some("stop"));
     }
 
     #[tokio::test]
@@ -656,22 +646,20 @@ mod tests {
         let tool_xml = tool_span(r#"[{"name": "get_weather", "arguments": {"city": "beijing"}}]"#);
         let frames = make_ds_stream(&[(&tool_xml, "RESPONSE")], None);
         let stream = futures::stream::iter(frames);
-        let json = aggregate(stream, "deepseek-default".into(), vec![], 0, None)
+        let resp = aggregate(stream, "deepseek-default".into(), vec![], 0, None)
             .await
             .unwrap();
-        let completion: serde_json::Value = serde_json::from_slice(&json).unwrap();
-        println!("\n=== AGGREGATED RESPONSE (tool_calls) ===");
-        println!("{}", serde_json::to_string_pretty(&completion).unwrap());
-        println!("=========================================\n");
-        assert_eq!(completion["choices"][0]["message"]["content"], "");
-        let calls = completion["choices"][0]["message"]["tool_calls"]
-            .as_array()
-            .unwrap();
+        let msg = &resp.choices[0].message;
+        assert_eq!(msg.content.as_deref(), Some(""));
+        let calls = msg.tool_calls.as_ref().unwrap();
         assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0]["type"], "function");
-        assert_eq!(calls[0]["function"]["name"], "get_weather");
-        assert_eq!(calls[0]["function"]["arguments"], r#"{"city":"beijing"}"#);
-        assert_eq!(completion["choices"][0]["finish_reason"], "tool_calls");
+        assert_eq!(calls[0].ty, "function");
+        assert_eq!(calls[0].function.as_ref().unwrap().name, "get_weather");
+        assert_eq!(
+            calls[0].function.as_ref().unwrap().arguments,
+            r#"{"city":"beijing"}"#
+        );
+        assert_eq!(resp.choices[0].finish_reason, Some("tool_calls"));
     }
 
     async fn collect_chunks(st: StreamResponse) -> Vec<serde_json::Value> {
@@ -693,7 +681,7 @@ mod tests {
     async fn stream_plain_text() {
         let frames = make_ds_stream(&[("hi", "RESPONSE")], None);
         let bytes_stream = futures::stream::iter(frames);
-        let chunks = collect_chunks(super::stream(
+        let chunks = collect_chunks(super::sse_stream(super::stream(
             bytes_stream,
             "m".into(),
             false,
@@ -701,7 +689,7 @@ mod tests {
             vec![],
             0,
             None,
-        ))
+        )))
         .await;
         println!("\n=== STREAM CHUNKS (plain_text) ===");
         for (i, c) in chunks.iter().enumerate() {
@@ -727,7 +715,7 @@ mod tests {
     async fn stream_include_usage() {
         let frames = make_ds_stream(&[("x", "RESPONSE")], Some(12));
         let bytes_stream = futures::stream::iter(frames);
-        let chunks = collect_chunks(super::stream(
+        let chunks = collect_chunks(super::sse_stream(super::stream(
             bytes_stream,
             "m".into(),
             true,
@@ -735,7 +723,7 @@ mod tests {
             vec![],
             0,
             None,
-        ))
+        )))
         .await;
         println!("\n=== STREAM CHUNKS (include_usage) ===");
         for (i, c) in chunks.iter().enumerate() {
@@ -768,7 +756,7 @@ mod tests {
         let tool_xml = tool_span(r#"[{"name": "f", "arguments": {}}]"#);
         let frames = make_ds_stream(&[(&tool_xml, "RESPONSE")], None);
         let bytes_stream = futures::stream::iter(frames);
-        let chunks = collect_chunks(super::stream(
+        let chunks = collect_chunks(super::sse_stream(super::stream(
             bytes_stream,
             "m".into(),
             false,
@@ -776,7 +764,7 @@ mod tests {
             vec![],
             0,
             None,
-        ))
+        )))
         .await;
         println!("\n=== STREAM CHUNKS (tool_calls) ===");
         for (i, c) in chunks.iter().enumerate() {
@@ -808,7 +796,7 @@ mod tests {
         let tool_xml = tool_span(r#"[{"name": "get_weather", "arguments": {"city": "北京"}}]"#);
         let frames = make_ds_stream(&[("思考中", "THINK"), (&tool_xml, "RESPONSE")], None);
         let bytes_stream = futures::stream::iter(frames);
-        let chunks = collect_chunks(super::stream(
+        let chunks = collect_chunks(super::sse_stream(super::stream(
             bytes_stream,
             "m".into(),
             false,
@@ -816,7 +804,7 @@ mod tests {
             vec![],
             0,
             None,
-        ))
+        )))
         .await;
         println!("\n=== STREAM CHUNKS (fragmented_tool_calls_with_thinking) ===");
         for (i, c) in chunks.iter().enumerate() {
@@ -866,7 +854,7 @@ mod tests {
             data: {\"p\":\"response/status\",\"v\":\"FINISHED\"}\n\n\
             event: finish\ndata: {}\n\n";
         let bytes_stream = futures::stream::iter(vec![sse_bytes(fixture)]);
-        let chunks = collect_chunks(super::stream(
+        let chunks = collect_chunks(super::sse_stream(super::stream(
             bytes_stream,
             "m".into(),
             false,
@@ -874,7 +862,7 @@ mod tests {
             vec![],
             0,
             None,
-        ))
+        )))
         .await;
         println!("\n=== STREAM CHUNKS (tool_search_and_open) ===");
         for (i, c) in chunks.iter().enumerate() {
@@ -910,7 +898,7 @@ mod tests {
             None,
         );
         let bytes_stream = futures::stream::iter(frames);
-        let chunks = collect_chunks(super::stream(
+        let chunks = collect_chunks(super::sse_stream(super::stream(
             bytes_stream,
             "m".into(),
             false,
@@ -918,7 +906,7 @@ mod tests {
             vec![],
             0,
             None,
-        ))
+        )))
         .await;
         println!("\n=== STREAM CHUNKS (include_obfuscation) ===");
         for (i, c) in chunks.iter().enumerate() {
@@ -971,25 +959,19 @@ mod tests {
             None,
         );
         let stream = futures::stream::iter(frames);
-        let json = aggregate(stream, "deepseek-default".into(), vec![], 0, None)
+        let resp = aggregate(stream, "deepseek-default".into(), vec![], 0, None)
             .await
             .unwrap();
-        let completion: serde_json::Value = serde_json::from_slice(&json).unwrap();
-        println!("\n=== AGGREGATED RESPONSE (tool_calls with leading text) ===");
-        println!("{}", serde_json::to_string_pretty(&completion).unwrap());
-        println!("===========================================================\n");
-        // 前导文本作为 content，tool_calls 结构化
-        assert_eq!(
-            completion["choices"][0]["message"]["content"],
-            "好的，我来帮你。"
-        );
-        let calls = completion["choices"][0]["message"]["tool_calls"]
-            .as_array()
-            .unwrap();
+        let msg = &resp.choices[0].message;
+        assert_eq!(msg.content.as_deref(), Some("好的，我来帮你。"));
+        let calls = msg.tool_calls.as_ref().unwrap();
         assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0]["function"]["name"], "get_weather");
-        assert_eq!(calls[0]["function"]["arguments"], r#"{"city":"beijing"}"#);
-        assert_eq!(completion["choices"][0]["finish_reason"], "tool_calls");
+        assert_eq!(calls[0].function.as_ref().unwrap().name, "get_weather");
+        assert_eq!(
+            calls[0].function.as_ref().unwrap().arguments,
+            r#"{"city":"beijing"}"#
+        );
+        assert_eq!(resp.choices[0].finish_reason, Some("tool_calls"));
     }
 
     #[tokio::test]
@@ -1005,7 +987,7 @@ mod tests {
             None,
         );
         let bytes_stream = futures::stream::iter(frames);
-        let chunks = collect_chunks(super::stream(
+        let chunks = collect_chunks(super::sse_stream(super::stream(
             bytes_stream,
             "m".into(),
             false,
@@ -1013,7 +995,7 @@ mod tests {
             vec![],
             0,
             None,
-        ))
+        )))
         .await;
         println!("\n=== STREAM CHUNKS (tool_calls with leading text, fragmented) ===");
         for (i, c) in chunks.iter().enumerate() {
@@ -1059,7 +1041,7 @@ mod tests {
             None,
         );
         let bytes_stream = futures::stream::iter(frames);
-        let chunks = collect_chunks(super::stream(
+        let chunks = collect_chunks(super::sse_stream(super::stream(
             bytes_stream,
             "m".into(),
             false,
@@ -1067,7 +1049,7 @@ mod tests {
             vec![],
             0,
             None,
-        ))
+        )))
         .await;
         println!("\n=== STREAM CHUNKS (leading text + multi-chunk JSON fragments) ===");
         for (i, c) in chunks.iter().enumerate() {
@@ -1106,7 +1088,7 @@ mod tests {
             None,
         );
         let bytes_stream = futures::stream::iter(frames);
-        let chunks = collect_chunks(super::stream(
+        let chunks = collect_chunks(super::sse_stream(super::stream(
             bytes_stream,
             "m".into(),
             false,
@@ -1114,7 +1096,7 @@ mod tests {
             vec![],
             0,
             None,
-        ))
+        )))
         .await;
         println!("\n=== STREAM CHUNKS (thinking + leading + fragmented JSON) ===");
         for (i, c) in chunks.iter().enumerate() {
@@ -1145,7 +1127,7 @@ mod tests {
         let tool_xml = tool_span(r#"[{"name": "f", "arguments": {}}]"#);
         let frames = make_ds_stream(&[("好的。", "RESPONSE"), (&tool_xml, "RESPONSE")], None);
         let bytes_stream = futures::stream::iter(frames);
-        let chunks = collect_chunks(super::stream(
+        let chunks = collect_chunks(super::sse_stream(super::stream(
             bytes_stream,
             "m".into(),
             false,
@@ -1153,7 +1135,7 @@ mod tests {
             vec![],
             0,
             None,
-        ))
+        )))
         .await;
         println!("\n=== STREAM CHUNKS (JSON split right after tool_call) ===");
         for (i, c) in chunks.iter().enumerate() {
@@ -1173,7 +1155,7 @@ mod tests {
         let tool_xml = tool_span(r#"[{"name": "get_weather", "arguments": {"city": "beijing"}}]"#);
         let frames = make_ds_stream(&[(&tool_xml, "RESPONSE")], None);
         let bytes_stream = futures::stream::iter(frames);
-        let chunks = collect_chunks(super::stream(
+        let chunks = collect_chunks(super::sse_stream(super::stream(
             bytes_stream,
             "deepseek-default".into(),
             false,
@@ -1181,7 +1163,7 @@ mod tests {
             vec![],
             0,
             None,
-        ))
+        )))
         .await;
         println!("\n=== STREAM CHUNKS (tool_calls, no leading text) ===");
         for (i, c) in chunks.iter().enumerate() {
