@@ -2,11 +2,10 @@
 //!
 //! 原则：接口层面全对齐，无法实现的字段解析后忽略。
 
-#![allow(dead_code)]
 // 说明：本文件包含大量 OpenAI 兼容字段，其中仅以下字段/类型在 request/response 中被实际消费。
 //
 // request  层直接使用：
-//   ChatCompletionRequest.model, messages, stream, stop, tools, tool_choice,
+//   ChatCompletionsRequest.model, messages, stream, stop, tools, tool_choice,
 //   parallel_tool_calls, web_search_options, reasoning_effort
 //   涉及子类型：Message / MessageContent / ContentPart / StopSequence / Tool /
 //   FunctionDefinition / CustomTool / CustomToolFormat / GrammarDefinition /
@@ -15,7 +14,7 @@
 //   FunctionCallNamed / ResponseFormat / StreamOptions / WebSearchOptions
 //
 // response 层直接使用：
-//   ChatCompletion / Choice / MessageResponse / ChatCompletionChunk /
+//   ChatCompletionsResponse / Choice / MessageResponse / ChatCompletionsResponseChunk /
 //   ChunkChoice / Delta / Usage / ToolCall / FunctionCall / Model / ModelList
 
 use serde::{Deserialize, Serialize};
@@ -26,7 +25,7 @@ use serde::{Deserialize, Serialize};
 
 /// POST /v1/chat/completions 请求体
 #[derive(Debug, Deserialize)]
-pub struct ChatCompletionRequest {
+pub struct ChatCompletionsRequest {
     pub model: String,
     pub messages: Vec<Message>,
 
@@ -388,7 +387,7 @@ impl Default for StreamOptions {
 
 /// 非流式 chat completion 响应
 #[derive(Debug, Serialize)]
-pub struct ChatCompletion {
+pub struct ChatCompletionsResponse {
     pub id: String,
     pub object: &'static str,
     pub created: u64,
@@ -432,7 +431,7 @@ pub struct MessageResponse {
 
 /// 流式 chunk
 #[derive(Debug, Serialize)]
-pub struct ChatCompletionChunk {
+pub struct ChatCompletionsResponseChunk {
     pub id: String,
     pub object: &'static str,
     pub created: u64,

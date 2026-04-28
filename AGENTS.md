@@ -123,10 +123,32 @@ This means the file tree does not directly map to the public API. To understand 
 ### Account Pool Model
 1 account = 1 session = 1 concurrency. Scale via more accounts in `config.toml`.
 
-### Request Flow
-`v0_chat()` → `get_account()` → `compute_pow()` → `edit_message(payload)` → `GuardedStream`
+### Request Flow (per-chat)
+`v0_chat()` → `get_account()` → `split_history()` → `create_session()` → `upload_files()` → `compute_pow()` → `completion()` → `parse_ready()` → `GuardedStream`
 
-`completions.rs` hardcodes `message_id: 1` in `EditMessagePayload` because the health check during initialization already writes message 0 into the session.
+Each `v0_chat()` call in `completions.rs` creates a dedicated session, uploads multi-turn history as files, then streams the response. The session is destroyed when the stream ends.
+
+### Single-Struct Pipeline
+
+The adapter layer uses a **single struct** (`ChatCompletionsRequest`) that flows through the entire request
+pipeline — no intermediate `AdapterRequest` or `prepare` step:
+
+```
+ChatCompletionsRequest
+  → functions/funcation_call 兼容
+  → normalize::apply |
+  → tools::extract   | 每个子函数直接读 ChatCompletionsRequest 的字段
+  → prompt::build    |
+  → resolver::resolve|
+  → tiktoken
+  → try_chat (ds_core::ChatRequest)
+  → if req.stream → ChatCompletionsResponseChunk | else → ChatCompletionsResponse
+```
+
+Response structs are serialized directly to JSON (via `#[derive(Serialize)]` + `serde_json::to_vec`),
+with no intermediate representation. `ChatCompletionsResponse` for non-streaming and
+`ChatCompletionsResponseChunk` for streaming are the only two chat completions output types.
+`ModelList`/`Model` serve `/v1/models` independently.
 
 ### GuardedStream & Account Lifecycle
 `AccountGuard` marks an account as `busy` and automatically releases it on `Drop`. `GuardedStream` wraps the SSE stream with an `AccountGuard`, so the account is held busy until the stream is fully consumed or dropped. This binds account concurrency to stream lifetime without explicit cleanup logic.
@@ -139,6 +161,16 @@ This means the file tree does not directly map to the public API. To understand 
 4. `update_title` — rename session to "managed-by-ai-free-api"
 
 Health check is required because an empty session will fail on `edit_message` with `invalid message id`.
+
+### Temp Session Lifecycle
+Each `v0_chat()` call creates a dedicated chat session and destroys it when the stream ends. `GuardedStream::drop` always calls `delete_session`, regardless of whether the stream completed naturally or the client disconnected. On abnormal disconnection, it also calls `stop_stream` before deletion. This avoids session leaks without explicit cleanup at call sites. Sessions are tracked in `active_sessions: Arc<Mutex<HashMap<String, ActiveSession>>>` to support `stop_stream` delivery by `message_id`.
+
+### History Splitting & File Upload
+Multi-turn conversations are handled by splitting the prompt into an inline portion (most recent messages) and a history portion (earlier messages), uploaded as a file. The split in `split_history_prompt()`:
+- The last user+assistant message pair and the final user message go inline
+- Everything earlier is wrapped in `[file content begin]` … `[file content end]` markers and uploaded as `EMPTY.txt`
+
+External files from the request (`ChatRequest.files`) are uploaded individually before the history file. Upload uses a separate PoW computation targeting `/api/v0/file/upload_file`, then polls for completion with 30 retries at 2s intervals (60s total timeout).
 
 ### Request Pipeline (OpenAI)
 ```
@@ -190,6 +222,8 @@ DeepSeek's free API returns `0` for `prompt_tokens`. The adapter computes this s
 ### Tool Calls via XML
 The adapter injects tool definitions as natural language into the prompt and parses `<tool_calls>` XML in the response back into structured `tool_calls` JSON. Custom (non-function) tools with grammar/text format definitions are also supported. When a tool call is triggered, `finish_reason` may be `"tool_calls"` instead of `"stop"`.
 
+The `arguments` field in tool call responses is normalized to always be a JSON string (never an object), so downstream consumers receive a consistent type regardless of what DeepSeek returns.
+
 ### Obfuscation
 Random base64 padding in SSE chunks to reach a target response size (~512 bytes), controlled by `stream_options.include_obfuscation` (defaults to true).
 
@@ -234,7 +268,7 @@ Optional Bearer token auth via `[[server.api_tokens]]` in config; no auth when e
 | Model listing | `src/openai_adapter/models.rs` | Model registry and listing |
 | HTTP server/routes | `src/server/` | handlers → stream → error |
 | Unified debug CLI | `examples/adapter_cli.rs` + `examples/adapter_cli-script.txt` | Modes: chat/raw/compare/concurrent/status/models |
-| Example request JSON | `examples/adapter_cli/` | Pre-built ChatCompletionRequest samples (chat, stream, stop, reasoning, web_search, tool_call, etc.) |
+| Example request JSON | `examples/adapter_cli/` | Pre-built ChatCompletionsRequest samples (chat, stream, stop, reasoning, web_search, tool_call, etc.) |
 | Scripted regression test | `just adapter-cli -- source examples/adapter_cli-script.txt` | Runs all JSON samples in sequence |
 | Stress test scripts | `py-e2e-tests/stress_test_tools_openai.py`, `py-e2e-tests/stress_test_tools_anthropic.py` | Load testing for OpenAI and Anthropic endpoints |
 | CI pipeline | `.github/workflows/ci.yml` | `cargo check + clippy + fmt + audit + machete` and `cargo test` |

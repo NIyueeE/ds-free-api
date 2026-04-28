@@ -4,6 +4,25 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.2.5] - 2026-04-28
+
+### Changed
+- **请求管道统一**：`OpenAIAdapter` 对外只暴露一个 `chat_completions(req: ChatCompletionsRequest)` 方法，
+  内部根据 `stream` 字段自动分流到 SSE 流或 JSON 聚合
+- **移除中间结构体**：删除 `AdapterRequest` 和 `prepare` 函数，
+  `ChatCompletionsRequest` 贯穿 normalize → tools → prompt → resolver → 分流全管道
+- **`ChatCompletionRequest` 重命名**：`ChatCompletionRequest` → `ChatCompletionsRequest`，
+  命名对齐实际端点路径
+- **ChatOutput 扩展**：`Stream` 变体携带 `input_tokens`，anthropic 流式路径无需再手动调用内部管道
+- **响应类型重命名**：`ChatCompletion` → `ChatCompletionsResponse`，`ChatCompletionChunk` → `ChatCompletionsResponseChunk`，命名与请求端对齐
+- **`#![allow(dead_code)]` 移除**：不再需要文件级允许
+
+### Removed
+- **`AdapterRequest` / `prepare` 函数**：被内联到 `chat_completions` 中
+- **`parse_request` 方法**：不再需要，外部直接 `serde_json::from_slice` 构造 `ChatCompletionsRequest`
+- **冗余单元测试**：删除 7 个重叠测试（`multimodal_user`、`tools_injection`、`tools_after_tool_role_message`、`function_call_none_ignores_functions`、`stream_true`、`aggregate_tool_calls_with_trailing_text`），合并 `stream_options_defaults`/`explicit` 为参数化测试
+- **`stream_tool_calls_repair_with_live_ds` 忽略测试**：已由 `py-e2e-tests/scenarios/repair/` 覆盖，不再保留被 `#[ignore]` 的死代码
+
 ## [0.2.4] - 2026-04-27
 
 ### Added

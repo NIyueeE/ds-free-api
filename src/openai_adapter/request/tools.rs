@@ -5,7 +5,7 @@
 
 use crate::openai_adapter::response::{TOOL_CALL_END, TOOL_CALL_START};
 use crate::openai_adapter::types::{
-    AllowedTools, AllowedToolsChoice, ChatCompletionRequest, CustomTool, CustomToolFormat,
+    AllowedTools, AllowedToolsChoice, ChatCompletionsRequest, CustomTool, CustomToolFormat,
     FunctionDefinition, Tool, ToolChoice,
 };
 
@@ -19,14 +19,14 @@ pub struct ToolContext {
     pub instruction_text: Option<String>,
 }
 
-fn has_tools(req: &ChatCompletionRequest) -> bool {
+fn has_tools(req: &ChatCompletionsRequest) -> bool {
     req.tools.as_ref().map(|t| !t.is_empty()).unwrap_or(false)
 }
 
 /// 从请求中提取并校验工具信息
 ///
 /// 当 tool_choice 为 none 时返回空的 ToolContext，不生成任何注入文本。
-pub fn extract(req: &ChatCompletionRequest) -> Result<ToolContext, String> {
+pub fn extract(req: &ChatCompletionsRequest) -> Result<ToolContext, String> {
     let default_choice = if has_tools(req) {
         ToolChoice::Mode("auto".to_string())
     } else {
@@ -201,7 +201,7 @@ fn format_function(func: &FunctionDefinition) -> Result<String, String> {
 }
 
 /// 构建工具调用指令块：模板 → 规则 → 动态正确示例
-fn build_tool_instruction_block(req: &ChatCompletionRequest) -> String {
+fn build_tool_instruction_block(req: &ChatCompletionsRequest) -> String {
     let mut lines: Vec<String> = Vec::new();
 
     // 模板

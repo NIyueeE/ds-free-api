@@ -17,8 +17,19 @@ pub(crate) mod request;
 pub(crate) mod response;
 mod types;
 
+pub use types::ChatCompletionsRequest;
+
 /// 流式响应类型
 pub type StreamResponse = Pin<Box<dyn Stream<Item = Result<Bytes, OpenAIAdapterError>> + Send>>;
+
+/// Chat Completions 统一输出
+pub enum ChatOutput {
+    Stream {
+        stream: StreamResponse,
+        input_tokens: u32,
+    },
+    Json(Vec<u8>),
+}
 
 /// adapter 层通用结果包装：携带请求结果和账号标识
 pub struct ChatResult<T> {
@@ -49,61 +60,107 @@ impl OpenAIAdapter {
         })
     }
 
-    /// 解析请求体为 AdapterRequest（仅解析一次，避免双重 JSON 解析）
-    pub(crate) fn parse_request(
-        &self,
-        body: &[u8],
-    ) -> Result<request::AdapterRequest, OpenAIAdapterError> {
-        request::parse(body, &self.model_registry)
-    }
-
-    /// POST /v1/chat/completions (非流式)
+    /// POST /v1/chat/completions（统一入口）
     ///
-    /// 底层复用流式接口，将 SSE 流聚合为单个 JSON 对象后返回
+    /// 内部校验参数、构建 ChatML prompt、按 stream 标记分流：
+    /// - stream=true  → 返回 SSE 字节流
+    /// - stream=false → 将 SSE 流聚合为单个 JSON 对象后返回
     pub async fn chat_completions(
         &self,
-        body: &[u8],
+        mut req: ChatCompletionsRequest,
         request_id: &str,
-    ) -> Result<ChatResult<Vec<u8>>, OpenAIAdapterError> {
-        let req = request::parse(body, &self.model_registry)?;
-        let chat_resp = self.try_chat(req.ds_req, request_id).await?;
-        let repair_fn = self.create_repair_fn(request_id);
-        let data = response::aggregate(
-            chat_resp.stream,
-            req.model,
-            req.stop,
-            req.prompt_tokens,
-            Some(repair_fn),
-        )
-        .await?;
-        Ok(ChatResult {
-            data,
-            account_id: chat_resp.account_id,
-        })
-    }
+    ) -> Result<ChatResult<ChatOutput>, OpenAIAdapterError> {
+        use crate::openai_adapter::types::{
+            FunctionCallOption, NamedFunction, NamedToolChoice, Tool, ToolChoice,
+        };
 
-    /// POST /v1/chat/completions (流式)
-    pub async fn chat_completions_stream(
-        &self,
-        body: &[u8],
-        request_id: &str,
-    ) -> Result<ChatResult<StreamResponse>, OpenAIAdapterError> {
-        let req = request::parse(body, &self.model_registry)?;
-        let chat_resp = self.try_chat(req.ds_req, request_id).await?;
-        let repair_fn = self.create_repair_fn(request_id);
-        let data = response::stream(
-            chat_resp.stream,
-            req.model,
-            req.include_usage,
-            req.include_obfuscation,
-            req.stop,
-            req.prompt_tokens,
-            Some(repair_fn),
-        );
-        Ok(ChatResult {
-            data,
-            account_id: chat_resp.account_id,
-        })
+        // 兼容旧版 functions / function_call → tools / tool_choice
+        if req.tools.as_ref().map(|t| t.is_empty()).unwrap_or(true)
+            && let Some(functions) = req.functions.clone()
+            && !functions.is_empty()
+        {
+            req.tools = Some(
+                functions
+                    .into_iter()
+                    .map(|f| Tool {
+                        ty: "function".to_string(),
+                        function: Some(f),
+                        custom: None,
+                    })
+                    .collect(),
+            );
+        }
+        if req.tool_choice.is_none()
+            && let Some(fc) = req.function_call.clone()
+        {
+            req.tool_choice = Some(match fc {
+                FunctionCallOption::Mode(mode) => ToolChoice::Mode(mode),
+                FunctionCallOption::Named(named) => ToolChoice::Named(NamedToolChoice {
+                    ty: "function".to_string(),
+                    function: NamedFunction { name: named.name },
+                }),
+            });
+        }
+
+        let norm = request::normalize::apply(&req).map_err(OpenAIAdapterError::BadRequest)?;
+        let tool_ctx = request::tools::extract(&req).map_err(OpenAIAdapterError::BadRequest)?;
+        let prompt = request::prompt::build(&req, &tool_ctx);
+        let model_res = request::resolver::resolve(
+            &self.model_registry,
+            &req.model,
+            req.reasoning_effort.as_deref(),
+            req.web_search_options.as_ref(),
+        )
+        .map_err(OpenAIAdapterError::BadRequest)?;
+
+        let prompt_tokens = tiktoken_rs::cl100k_base()
+            .map(|bpe| bpe.encode_with_special_tokens(&prompt).len() as u32)
+            .unwrap_or(0);
+
+        let chat_req = crate::ds_core::ChatRequest {
+            prompt,
+            thinking_enabled: model_res.thinking_enabled,
+            search_enabled: model_res.search_enabled,
+            model_type: model_res.model_type,
+            files: vec![],
+        };
+
+        let chat_resp = self.try_chat(chat_req, request_id).await?;
+        let account_id = chat_resp.account_id;
+
+        if req.stream {
+            let repair_fn = self.create_repair_fn(request_id);
+            let s = response::stream(
+                chat_resp.stream,
+                req.model,
+                norm.include_usage,
+                norm.include_obfuscation,
+                norm.stop,
+                prompt_tokens,
+                Some(repair_fn),
+            );
+            Ok(ChatResult {
+                data: ChatOutput::Stream {
+                    stream: s,
+                    input_tokens: prompt_tokens,
+                },
+                account_id,
+            })
+        } else {
+            let repair_fn = self.create_repair_fn(request_id);
+            let json = response::aggregate(
+                chat_resp.stream,
+                req.model,
+                norm.stop,
+                prompt_tokens,
+                Some(repair_fn),
+            )
+            .await?;
+            Ok(ChatResult {
+                data: ChatOutput::Json(json),
+                account_id,
+            })
+        }
     }
 
     /// 内部辅助：对 `Overloaded` 进行指数退避重试
@@ -155,8 +212,26 @@ impl OpenAIAdapter {
         body: &[u8],
         request_id: &str,
     ) -> Result<ChatResult<StreamResponse>, OpenAIAdapterError> {
-        let req = request::parse(body, &self.model_registry)?;
-        let chat_resp = self.try_chat(req.ds_req, request_id).await?;
+        let chat_req: ChatCompletionsRequest = serde_json::from_slice(body)
+            .map_err(|e| OpenAIAdapterError::BadRequest(format!("bad request: {}", e)))?;
+        let model_res = request::resolver::resolve(
+            &self.model_registry,
+            &chat_req.model,
+            chat_req.reasoning_effort.as_deref(),
+            chat_req.web_search_options.as_ref(),
+        )
+        .map_err(OpenAIAdapterError::BadRequest)?;
+        let ds_req = crate::ds_core::ChatRequest {
+            prompt: request::prompt::build(
+                &chat_req,
+                &request::tools::extract(&chat_req).map_err(OpenAIAdapterError::BadRequest)?,
+            ),
+            thinking_enabled: model_res.thinking_enabled,
+            search_enabled: model_res.search_enabled,
+            model_type: model_res.model_type,
+            files: vec![],
+        };
+        let chat_resp = self.try_chat(ds_req, request_id).await?;
         let data = Box::pin(
             chat_resp
                 .stream

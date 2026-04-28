@@ -17,7 +17,9 @@ use bytes::Bytes;
 use futures::Stream;
 use log::debug;
 
-use crate::openai_adapter::{ChatResult, OpenAIAdapter, OpenAIAdapterError};
+use crate::openai_adapter::{
+    ChatCompletionsRequest, ChatOutput, ChatResult, OpenAIAdapter, OpenAIAdapterError,
+};
 
 /// Anthropic 兼容层
 pub struct AnthropicCompat {
@@ -40,12 +42,21 @@ impl AnthropicCompat {
     ) -> Result<ChatResult<Vec<u8>>, AnthropicCompatError> {
         debug!(target: "anthropic_compat", "收到 messages 请求");
         let openai_body = request::to_openai_request(body)?;
+        let openai_req: ChatCompletionsRequest = serde_json::from_slice(&openai_body)
+            .map_err(|e| AnthropicCompatError::Internal(format!("json error: {}", e)))?;
         let openai_result = self
             .openai_adapter
-            .chat_completions(&openai_body, request_id)
+            .chat_completions(openai_req, request_id)
             .await?;
-        let data = response::from_chat_completion_bytes(&openai_result.data)
-            .map_err(|e| AnthropicCompatError::Internal(format!("json error: {}", e)))?;
+        let data = match openai_result.data {
+            ChatOutput::Json(json) => response::from_chat_completion_bytes(&json)
+                .map_err(|e| AnthropicCompatError::Internal(format!("json error: {}", e)))?,
+            ChatOutput::Stream { .. } => {
+                return Err(AnthropicCompatError::Internal(
+                    "unexpected stream response for non-streaming request".to_string(),
+                ));
+            }
+        };
         Ok(ChatResult {
             data,
             account_id: openai_result.account_id,
@@ -62,30 +73,27 @@ impl AnthropicCompat {
     ) -> Result<ChatResult<StreamResponse>, AnthropicCompatError> {
         debug!(target: "anthropic_compat", "收到流式 messages 请求");
         let openai_body = request::to_openai_request(body)?;
-        let openai_req = self
+        let chat_req: ChatCompletionsRequest = serde_json::from_slice(&openai_body)
+            .map_err(|e| AnthropicCompatError::Internal(format!("json error: {}", e)))?;
+        let result = self
             .openai_adapter
-            .parse_request(&openai_body)
-            .map_err(AnthropicCompatError::from)?;
-        let input_tokens = openai_req.prompt_tokens;
-        let chat_resp = self
-            .openai_adapter
-            .try_chat(openai_req.ds_req, request_id)
-            .await
-            .map_err(OpenAIAdapterError::from)?;
-        let repair_fn = self.openai_adapter.create_repair_fn(request_id);
-        let openai_stream = crate::openai_adapter::response::stream(
-            chat_resp.stream,
-            openai_req.model,
-            openai_req.include_usage,
-            openai_req.include_obfuscation,
-            openai_req.stop,
-            openai_req.prompt_tokens,
-            Some(repair_fn),
-        );
+            .chat_completions(chat_req, request_id)
+            .await?;
+        let (input_tokens, openai_stream) = match result.data {
+            ChatOutput::Stream {
+                stream,
+                input_tokens,
+            } => (input_tokens, stream),
+            ChatOutput::Json(_) => {
+                return Err(AnthropicCompatError::Internal(
+                    "unexpected json response for streaming request".to_string(),
+                ));
+            }
+        };
         let data = response::from_chat_completion_stream(openai_stream, input_tokens);
         Ok(ChatResult {
             data,
-            account_id: chat_resp.account_id,
+            account_id: result.account_id,
         })
     }
 

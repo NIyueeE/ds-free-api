@@ -1,4 +1,4 @@
-//! OpenAI Chunk 生成器 —— 将 DsFrame 映射为 ChatCompletionChunk
+//! OpenAI Chunk 生成器 —— 将 DsFrame 映射为 ChatCompletionsResponseChunk
 
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -9,13 +9,13 @@ use pin_project_lite::pin_project;
 use log::trace;
 
 use crate::openai_adapter::OpenAIAdapterError;
-use crate::openai_adapter::types::{ChatCompletionChunk, ChunkChoice, Delta, Usage};
+use crate::openai_adapter::types::{ChatCompletionsResponseChunk, ChunkChoice, Delta, Usage};
 
 use super::state::DsFrame;
 use super::{next_chatcmpl_id, now_secs};
 
-fn make_usage_chunk(usage: Usage, model: &str) -> ChatCompletionChunk {
-    ChatCompletionChunk {
+fn make_usage_chunk(usage: Usage, model: &str) -> ChatCompletionsResponseChunk {
+    ChatCompletionsResponseChunk {
         id: next_chatcmpl_id(),
         object: "chat.completion.chunk",
         created: now_secs(),
@@ -41,8 +41,8 @@ pub(crate) fn make_chunk(
     model: &str,
     delta: Delta,
     finish: Option<&'static str>,
-) -> ChatCompletionChunk {
-    ChatCompletionChunk {
+) -> ChatCompletionsResponseChunk {
+    ChatCompletionsResponseChunk {
         id: next_chatcmpl_id(),
         object: "chat.completion.chunk",
         created: now_secs(),
@@ -60,7 +60,7 @@ pub(crate) fn make_chunk(
 }
 
 pin_project! {
-    // 将 DsFrame 增量帧映射为 OpenAI ChatCompletionChunk 的流转换器
+    // 将 DsFrame 增量帧映射为 OpenAI ChatCompletionsResponseChunk 的流转换器
     pub struct ConverterStream<S> {
         #[pin]
         inner: S,
@@ -98,7 +98,7 @@ impl<S> Stream for ConverterStream<S>
 where
     S: Stream<Item = Result<DsFrame, OpenAIAdapterError>>,
 {
-    type Item = Result<ChatCompletionChunk, OpenAIAdapterError>;
+    type Item = Result<ChatCompletionsResponseChunk, OpenAIAdapterError>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let mut this = self.project();

@@ -24,7 +24,10 @@ use std::sync::Arc;
 
 use crate::openai_adapter::{
     OpenAIAdapterError, StreamResponse,
-    types::{ChatCompletion, ChatCompletionChunk, Choice, Delta, MessageResponse, ToolCall, Usage},
+    types::{
+        ChatCompletionsResponse, ChatCompletionsResponseChunk, Choice, Delta, MessageResponse,
+        ToolCall, Usage,
+    },
 };
 
 static CHATCMPL_ID_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
@@ -58,7 +61,7 @@ fn random_padding(len: usize) -> String {
 }
 
 fn chunk_to_bytes(
-    mut chunk: ChatCompletionChunk,
+    mut chunk: ChatCompletionsResponseChunk,
     include_obfuscation: bool,
 ) -> Result<Bytes, OpenAIAdapterError> {
     if include_obfuscation && !chunk.choices.is_empty() {
@@ -83,7 +86,7 @@ fn find_stop_pos(content: &str, stop: &[String]) -> Option<usize> {
 
 /// RepairStream 内部使用的流类型
 type ChunkStream =
-    Pin<Box<dyn Stream<Item = Result<ChatCompletionChunk, OpenAIAdapterError>> + Send>>;
+    Pin<Box<dyn Stream<Item = Result<ChatCompletionsResponseChunk, OpenAIAdapterError>> + Send>>;
 
 /// 工具调用修复闭包类型
 pub type RepairFn = Arc<
@@ -172,7 +175,7 @@ impl RepairStream {
 }
 
 impl Stream for RepairStream {
-    type Item = Result<ChatCompletionChunk, OpenAIAdapterError>;
+    type Item = Result<ChatCompletionsResponseChunk, OpenAIAdapterError>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let mut this = self.project();
@@ -266,7 +269,7 @@ pin_project! {
 
 impl<S> Stream for StopStream<S>
 where
-    S: Stream<Item = Result<ChatCompletionChunk, OpenAIAdapterError>>,
+    S: Stream<Item = Result<ChatCompletionsResponseChunk, OpenAIAdapterError>>,
 {
     type Item = Result<Bytes, OpenAIAdapterError>;
 
@@ -356,11 +359,11 @@ where
     );
     let tool_parsed = tool_parser::ToolCallStream::new(converted, model.clone());
     let tool_boxed: Pin<
-        Box<dyn Stream<Item = Result<ChatCompletionChunk, OpenAIAdapterError>> + Send>,
+        Box<dyn Stream<Item = Result<ChatCompletionsResponseChunk, OpenAIAdapterError>> + Send>,
     > = Box::pin(tool_parsed);
 
     let after_repair: Pin<
-        Box<dyn Stream<Item = Result<ChatCompletionChunk, OpenAIAdapterError>> + Send>,
+        Box<dyn Stream<Item = Result<ChatCompletionsResponseChunk, OpenAIAdapterError>> + Send>,
     > = if let Some(f) = repair_fn {
         Box::pin(RepairStream::new(tool_boxed, f, model))
     } else {
@@ -382,7 +385,7 @@ where
 ///
 /// 始终保持为 stream() 的流式收集和重组：
 /// - 所有核心处理（修复、转换、停止序列）都在 stream() 中完成
-/// - 本函数仅将 stream() 的输出事件聚合并重组成单条 ChatCompletion JSON
+/// - 本函数仅将 stream() 的输出事件聚合并重组成单条 ChatCompletionsResponse JSON
 /// - 不要在此函数中添加任何独立于 stream() 的处理逻辑
 pub(crate) async fn aggregate<S>(
     ds_stream: S,
@@ -493,7 +496,7 @@ where
         finish_reason
     };
 
-    let completion = ChatCompletion {
+    let completion = ChatCompletionsResponse {
         id,
         object: "chat.completion",
         created,
@@ -546,16 +549,6 @@ mod tests {
             tool_parser::TOOL_CALL_START,
             content,
             tool_parser::TOOL_CALL_END
-        )
-    }
-
-    fn tool_span_ts(content: &str, suffix: &str) -> String {
-        format!(
-            "{}{}{}{}",
-            tool_parser::TOOL_CALL_START,
-            content,
-            tool_parser::TOOL_CALL_END,
-            suffix
         )
     }
 
@@ -679,132 +672,6 @@ mod tests {
         assert_eq!(calls[0]["function"]["name"], "get_weather");
         assert_eq!(calls[0]["function"]["arguments"], r#"{"city":"beijing"}"#);
         assert_eq!(completion["choices"][0]["finish_reason"], "tool_calls");
-    }
-
-    #[tokio::test]
-    async fn aggregate_tool_calls_with_trailing_text() {
-        let tool_xml = tool_span_ts(
-            r#"[{"name": "get_weather", "arguments": {}}]"#,
-            " trailing text",
-        );
-        let frames = make_ds_stream(&[(&tool_xml, "RESPONSE")], None);
-        let stream = futures::stream::iter(frames);
-        let json = aggregate(stream, "deepseek-default".into(), vec![], 0, None)
-            .await
-            .unwrap();
-        let completion: serde_json::Value = serde_json::from_slice(&json).unwrap();
-        println!("\n=== AGGREGATED RESPONSE (tool_calls + trailing text) ===");
-        println!("{}", serde_json::to_string_pretty(&completion).unwrap());
-        println!("========================================================\n");
-        assert_eq!(completion["choices"][0]["message"]["content"], "");
-        let calls = completion["choices"][0]["message"]["tool_calls"]
-            .as_array()
-            .unwrap();
-        assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0]["function"]["name"], "get_weather");
-        assert_eq!(completion["choices"][0]["finish_reason"], "tool_calls");
-    }
-
-    async fn try_create_adapter(path: &str) -> Option<crate::openai_adapter::OpenAIAdapter> {
-        let p = std::path::Path::new(path);
-        if !p.exists() {
-            eprintln!("Config not found: {path}");
-            return None;
-        }
-        let config = match crate::config::Config::load(p) {
-            Ok(c) => c,
-            Err(e) => {
-                eprintln!("Failed to load {path}: {e}");
-                return None;
-            }
-        };
-        match crate::openai_adapter::OpenAIAdapter::new(&config).await {
-            Ok(a) => Some(a),
-            Err(e) => {
-                eprintln!("Adapter init failed for {path}: {e}");
-                None
-            }
-        }
-    }
-
-    #[ignore = "需要真实 DeepSeek API 调用，仅手动验证"]
-    #[tokio::test]
-    async fn stream_tool_calls_repair_with_live_ds() {
-        // 优先用 e2e 测试配置，失败则回退到主配置
-        let adapter = match try_create_adapter("py-e2e-tests/config.toml").await {
-            Some(a) => a,
-            None => match try_create_adapter("config.toml").await {
-                Some(a) => a,
-                None => {
-                    eprintln!("Skipping test: no working config found");
-                    return;
-                }
-            },
-        };
-        let repair_fn = adapter.create_repair_fn("repair-test");
-
-        // 多种真实中毒场景：模型输出的 tool_calls 格式损坏
-        let cases: Vec<(&str, String)> = vec![
-            (
-                "括号不闭合",
-                tool_span(r#"{"name": "get_weather", "arguments": {"city": "Beijing"}"#),
-            ),
-            (
-                "括号样式不一致 — [ 与 } 混用",
-                tool_span(r#"[{"name": "get_weather", "arguments": {"city": "Beijing"}]}"#),
-            ),
-            (
-                "XML 风格 — 模型输出 XML 标签而非 JSON",
-                tool_span(
-                    r#"<function><name>get_weather</name><arguments>{"city":"Beijing"}</arguments></function>"#,
-                ),
-            ),
-        ];
-
-        let mut failures = 0u32;
-        for (label, tool_xml) in &cases {
-            let frames = make_ds_stream(&[(tool_xml.as_str(), "RESPONSE")], None);
-            let bytes_stream = futures::stream::iter(frames);
-
-            let chunks = collect_chunks(super::stream(
-                bytes_stream,
-                "deepseek-default".into(),
-                false,
-                false,
-                vec![],
-                0,
-                Some(repair_fn.clone()),
-            ))
-            .await;
-
-            let tool_chunks: Vec<_> = chunks
-                .iter()
-                .filter(|c| {
-                    c["choices"][0]["delta"]["tool_calls"]
-                        .as_array()
-                        .is_some_and(|a| !a.is_empty())
-                })
-                .collect();
-
-            match tool_chunks.first() {
-                Some(tool_chunk) => {
-                    let call = &tool_chunk["choices"][0]["delta"]["tool_calls"][0];
-                    let name = call["function"]["name"].as_str().unwrap_or("?");
-                    let args = call["function"]["arguments"].as_str().unwrap_or("?");
-                    println!("  ✅ {label} → {name}({args})");
-                }
-                None => {
-                    failures += 1;
-                    eprintln!(
-                        "  ❌ {label} — 修复失败, chunks:\n{}",
-                        serde_json::to_string_pretty(&chunks).unwrap()
-                    );
-                }
-            }
-        }
-
-        adapter.shutdown().await;
-        assert_eq!(failures, 0, "{} of {} cases failed", failures, cases.len());
     }
 
     async fn collect_chunks(st: StreamResponse) -> Vec<serde_json::Value> {

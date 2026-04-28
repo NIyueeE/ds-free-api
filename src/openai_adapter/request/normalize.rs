@@ -2,10 +2,9 @@
 //!
 //! 职责：验证必填字段、消息格式，并将可选参数收敛为内部使用的标准化值。
 
-use crate::openai_adapter::types::{ChatCompletionRequest, StopSequence};
+use crate::openai_adapter::types::{ChatCompletionsRequest, StopSequence};
 
 pub struct NormalizedParams {
-    pub stream: bool,
     pub include_usage: bool,
     pub include_obfuscation: bool,
     pub stop: Vec<String>,
@@ -18,7 +17,7 @@ pub struct NormalizedParams {
 /// - messages 不能为空
 /// - role=tool 的消息必须包含 tool_call_id
 /// - role=function 的消息必须包含 name
-pub fn apply(req: &ChatCompletionRequest) -> Result<NormalizedParams, String> {
+pub fn apply(req: &ChatCompletionsRequest) -> Result<NormalizedParams, String> {
     if req.model.trim().is_empty() {
         return Err("缺少必填字段 'model'".into());
     }
@@ -45,8 +44,6 @@ pub fn apply(req: &ChatCompletionRequest) -> Result<NormalizedParams, String> {
         }
     }
 
-    let stream = req.stream;
-
     let include_usage = req
         .stream_options
         .as_ref()
@@ -66,7 +63,6 @@ pub fn apply(req: &ChatCompletionRequest) -> Result<NormalizedParams, String> {
     };
 
     Ok(NormalizedParams {
-        stream,
         include_usage,
         include_obfuscation,
         stop,

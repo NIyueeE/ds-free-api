@@ -5,14 +5,14 @@
 
 use super::tools::ToolContext;
 use crate::openai_adapter::response::{TOOL_CALL_END, TOOL_CALL_START};
-use crate::openai_adapter::types::{ChatCompletionRequest, ContentPart, Message, MessageContent};
+use crate::openai_adapter::types::{ChatCompletionsRequest, ContentPart, Message, MessageContent};
 
 const IM_START: &str = "<|im_start|>";
 const IM_END: &str = "<|im_end|>";
 
 /// 构建 ChatML 格式的 prompt 字符串
 /// 顺序: [system] [历史 user/tool/assistant 轮次...] [reminder] [最后一轮 user/tool] <|im_start|>assistant
-pub fn build(req: &ChatCompletionRequest, tool_ctx: &ToolContext) -> String {
+pub fn build(req: &ChatCompletionsRequest, tool_ctx: &ToolContext) -> String {
     let msg_parts: Vec<String> = req.messages.iter().map(format_message).collect();
 
     let mut tool_sections: Vec<String> = Vec::new();

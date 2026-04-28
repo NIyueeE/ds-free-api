@@ -17,7 +17,7 @@ use log::{debug, warn};
 
 use crate::openai_adapter::OpenAIAdapterError;
 use crate::openai_adapter::types::{
-    ChatCompletionChunk, ChunkChoice, Delta, FunctionCall, ToolCall,
+    ChatCompletionsResponseChunk, ChunkChoice, Delta, FunctionCall, ToolCall,
 };
 
 static CALL_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -213,8 +213,12 @@ pub fn parse_tool_calls(xml: &str) -> Option<(Vec<ToolCall>, String)> {
     Some((calls, remaining))
 }
 
-fn make_end_chunk(model: &str, delta: Delta, finish_reason: &'static str) -> ChatCompletionChunk {
-    ChatCompletionChunk {
+fn make_end_chunk(
+    model: &str,
+    delta: Delta,
+    finish_reason: &'static str,
+) -> ChatCompletionsResponseChunk {
+    ChatCompletionsResponseChunk {
         id: "chatcmpl-end".to_string(),
         object: "chat.completion.chunk",
         created: 0,
@@ -270,9 +274,9 @@ impl<S> ToolCallStream<S> {
 
 impl<S> Stream for ToolCallStream<S>
 where
-    S: Stream<Item = Result<ChatCompletionChunk, OpenAIAdapterError>>,
+    S: Stream<Item = Result<ChatCompletionsResponseChunk, OpenAIAdapterError>>,
 {
-    type Item = Result<ChatCompletionChunk, OpenAIAdapterError>;
+    type Item = Result<ChatCompletionsResponseChunk, OpenAIAdapterError>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let mut this = self.project();
