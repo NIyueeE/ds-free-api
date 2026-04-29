@@ -9,7 +9,7 @@ mod sse_parser;
 mod state;
 mod tool_parser;
 
-pub(crate) use tool_parser::{TOOL_CALL_END, TOOL_CALL_START};
+pub(crate) use tool_parser::{TOOL_CALL_END, TOOL_CALL_START, TagConfig};
 
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -88,6 +88,7 @@ pub type RepairFn = Arc<
 /// 执行 tool_calls 修复：将 ds_core 字节流解析后提取文本，转换为结构化 ToolCall
 pub(crate) async fn execute_tool_repair(
     ds_stream: Pin<Box<dyn Stream<Item = Result<Bytes, crate::ds_core::CoreError>> + Send>>,
+    tag_config: &TagConfig,
 ) -> Result<Vec<ToolCall>, OpenAIAdapterError> {
     let sse = sse_parser::SseStream::new(ds_stream);
     let state_stream = state::StateStream::new(sse);
@@ -105,7 +106,7 @@ pub(crate) async fn execute_tool_repair(
         }
     }
 
-    let wrapped = if text.contains(tool_parser::TOOL_CALL_START) {
+    let wrapped = if tool_parser::contains_start_tag_with(&text, tag_config) {
         text.trim().to_string()
     } else {
         format!(
@@ -116,7 +117,7 @@ pub(crate) async fn execute_tool_repair(
         )
     };
 
-    let (calls, _) = tool_parser::parse_tool_calls(&wrapped).ok_or_else(|| {
+    let (calls, _) = tool_parser::parse_tool_calls_with(&wrapped, tag_config).ok_or_else(|| {
         OpenAIAdapterError::Internal(format!(
             "修复模型返回无法解析为工具调用: {}",
             &text[..text.len().min(200)]
@@ -324,41 +325,43 @@ where
     }
 }
 
+/// 流式响应参数（减少 stream() 参数个数）
+pub(crate) struct StreamCfg {
+    pub include_usage: bool,
+    pub include_obfuscation: bool,
+    pub stop: Vec<String>,
+    pub prompt_tokens: u32,
+    pub repair_fn: Option<RepairFn>,
+    pub tag_config: Arc<TagConfig>,
+}
+
 /// 流式响应：把 ds_core 字节流转换为 ChatCompletionsResponseChunk 流
-pub(crate) fn stream<S>(
-    ds_stream: S,
-    model: String,
-    include_usage: bool,
-    include_obfuscation: bool,
-    stop: Vec<String>,
-    prompt_tokens: u32,
-    repair_fn: Option<RepairFn>,
-) -> ChunkStream
+pub(crate) fn stream<S>(ds_stream: S, model: String, cfg: StreamCfg) -> ChunkStream
 where
     S: Stream<Item = Result<Bytes, crate::ds_core::CoreError>> + Send + 'static,
 {
     debug!(
         target: "adapter",
         "构建流式响应: model={}, include_usage={}, include_obfuscation={}, stop_count={}, repair={}",
-        model, include_usage, include_obfuscation, stop.len(), repair_fn.is_some()
+        model, cfg.include_usage, cfg.include_obfuscation, cfg.stop.len(), cfg.repair_fn.is_some()
     );
     let sse = sse_parser::SseStream::new(ds_stream);
     let state_stream = state::StateStream::new(sse);
     let converted = converter::ConverterStream::new(
         state_stream,
         model.clone(),
-        include_usage,
-        include_obfuscation,
-        prompt_tokens,
+        cfg.include_usage,
+        cfg.include_obfuscation,
+        cfg.prompt_tokens,
     );
-    let tool_parsed = tool_parser::ToolCallStream::new(converted, model.clone());
+    let tool_parsed = tool_parser::ToolCallStream::new(converted, model.clone(), cfg.tag_config);
     let tool_boxed: Pin<
         Box<dyn Stream<Item = Result<ChatCompletionsResponseChunk, OpenAIAdapterError>> + Send>,
     > = Box::pin(tool_parsed);
 
     let after_repair: Pin<
         Box<dyn Stream<Item = Result<ChatCompletionsResponseChunk, OpenAIAdapterError>> + Send>,
-    > = if let Some(f) = repair_fn {
+    > = if let Some(f) = cfg.repair_fn {
         Box::pin(RepairStream::new(tool_boxed, f, model))
     } else {
         tool_boxed
@@ -366,11 +369,11 @@ where
 
     let stop_detect = StopDetectStream {
         inner: after_repair,
-        stop,
+        stop: cfg.stop,
         stopped: false,
         sent_len: 0,
         buffer: String::new(),
-        include_obfuscation,
+        include_obfuscation: cfg.include_obfuscation,
     };
     Box::pin(stop_detect)
 }
@@ -413,22 +416,20 @@ where
 pub(crate) async fn aggregate<S>(
     ds_stream: S,
     model: String,
-    stop: Vec<String>,
-    prompt_tokens: u32,
-    repair_fn: Option<RepairFn>,
+    cfg: StreamCfg,
 ) -> Result<ChatCompletionsResponse, OpenAIAdapterError>
 where
     S: Stream<Item = Result<Bytes, crate::ds_core::CoreError>> + Send + 'static,
 {
-    debug!(target: "adapter", "构建非流式响应: model={}, stop_count={}", model, stop.len());
+    debug!(target: "adapter", "构建非流式响应: model={}, stop_count={}", model, cfg.stop.len());
     let chunk_stream = stream(
         ds_stream,
         model.clone(),
-        true,  // include_usage
-        false, // include_obfuscation
-        stop,
-        prompt_tokens,
-        repair_fn,
+        StreamCfg {
+            include_usage: true,
+            include_obfuscation: false,
+            ..cfg
+        },
     );
     futures::pin_mut!(chunk_stream);
 
@@ -536,10 +537,16 @@ where
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use bytes::Bytes;
     use futures::StreamExt;
 
     use super::*;
+
+    fn default_tag_config() -> Arc<TagConfig> {
+        Arc::new(TagConfig::from_config(&Default::default()))
+    }
 
     fn sse_bytes(body: &str) -> Result<Bytes, crate::ds_core::CoreError> {
         Ok(Bytes::from(body.to_string()))
@@ -617,9 +624,20 @@ mod tests {
     async fn aggregate_plain_text() {
         let frames = make_ds_stream(&[("hello world", "RESPONSE")], Some(41));
         let stream = futures::stream::iter(frames);
-        let resp = aggregate(stream, "deepseek-default".into(), vec![], 0, None)
-            .await
-            .unwrap();
+        let resp = aggregate(
+            stream,
+            "deepseek-default".into(),
+            super::StreamCfg {
+                include_usage: false,
+                include_obfuscation: false,
+                stop: vec![],
+                prompt_tokens: 0,
+                repair_fn: None,
+                tag_config: default_tag_config(),
+            },
+        )
+        .await
+        .unwrap();
         assert_eq!(resp.object, "chat.completion");
         assert_eq!(resp.model, "deepseek-default");
         let msg = &resp.choices[0].message;
@@ -632,9 +650,20 @@ mod tests {
     async fn aggregate_thinking() {
         let frames = make_ds_stream(&[("thinking", "THINK"), ("answer", "RESPONSE")], None);
         let stream = futures::stream::iter(frames);
-        let resp = aggregate(stream, "deepseek-expert".into(), vec![], 0, None)
-            .await
-            .unwrap();
+        let resp = aggregate(
+            stream,
+            "deepseek-expert".into(),
+            super::StreamCfg {
+                include_usage: false,
+                include_obfuscation: false,
+                stop: vec![],
+                prompt_tokens: 0,
+                repair_fn: None,
+                tag_config: default_tag_config(),
+            },
+        )
+        .await
+        .unwrap();
         let msg = &resp.choices[0].message;
         assert_eq!(msg.reasoning_content.as_deref(), Some("thinking"));
         assert_eq!(msg.content.as_deref(), Some("answer"));
@@ -646,9 +675,20 @@ mod tests {
         let tool_xml = tool_span(r#"[{"name": "get_weather", "arguments": {"city": "beijing"}}]"#);
         let frames = make_ds_stream(&[(&tool_xml, "RESPONSE")], None);
         let stream = futures::stream::iter(frames);
-        let resp = aggregate(stream, "deepseek-default".into(), vec![], 0, None)
-            .await
-            .unwrap();
+        let resp = aggregate(
+            stream,
+            "deepseek-default".into(),
+            super::StreamCfg {
+                include_usage: false,
+                include_obfuscation: false,
+                stop: vec![],
+                prompt_tokens: 0,
+                repair_fn: None,
+                tag_config: default_tag_config(),
+            },
+        )
+        .await
+        .unwrap();
         let msg = &resp.choices[0].message;
         assert_eq!(msg.content.as_deref(), Some(""));
         let calls = msg.tool_calls.as_ref().unwrap();
@@ -684,11 +724,14 @@ mod tests {
         let chunks = collect_chunks(super::sse_stream(super::stream(
             bytes_stream,
             "m".into(),
-            false,
-            false,
-            vec![],
-            0,
-            None,
+            super::StreamCfg {
+                include_usage: false,
+                include_obfuscation: false,
+                stop: vec![],
+                prompt_tokens: 0,
+                repair_fn: None,
+                tag_config: default_tag_config(),
+            },
         )))
         .await;
         println!("\n=== STREAM CHUNKS (plain_text) ===");
@@ -718,11 +761,14 @@ mod tests {
         let chunks = collect_chunks(super::sse_stream(super::stream(
             bytes_stream,
             "m".into(),
-            true,
-            false,
-            vec![],
-            0,
-            None,
+            super::StreamCfg {
+                include_usage: true,
+                include_obfuscation: false,
+                stop: vec![],
+                prompt_tokens: 0,
+                repair_fn: None,
+                tag_config: default_tag_config(),
+            },
         )))
         .await;
         println!("\n=== STREAM CHUNKS (include_usage) ===");
@@ -759,11 +805,14 @@ mod tests {
         let chunks = collect_chunks(super::sse_stream(super::stream(
             bytes_stream,
             "m".into(),
-            false,
-            false,
-            vec![],
-            0,
-            None,
+            super::StreamCfg {
+                include_usage: false,
+                include_obfuscation: false,
+                stop: vec![],
+                prompt_tokens: 0,
+                repair_fn: None,
+                tag_config: default_tag_config(),
+            },
         )))
         .await;
         println!("\n=== STREAM CHUNKS (tool_calls) ===");
@@ -799,11 +848,14 @@ mod tests {
         let chunks = collect_chunks(super::sse_stream(super::stream(
             bytes_stream,
             "m".into(),
-            false,
-            false,
-            vec![],
-            0,
-            None,
+            super::StreamCfg {
+                include_usage: false,
+                include_obfuscation: false,
+                stop: vec![],
+                prompt_tokens: 0,
+                repair_fn: None,
+                tag_config: default_tag_config(),
+            },
         )))
         .await;
         println!("\n=== STREAM CHUNKS (fragmented_tool_calls_with_thinking) ===");
@@ -857,11 +909,14 @@ mod tests {
         let chunks = collect_chunks(super::sse_stream(super::stream(
             bytes_stream,
             "m".into(),
-            false,
-            false,
-            vec![],
-            0,
-            None,
+            super::StreamCfg {
+                include_usage: false,
+                include_obfuscation: false,
+                stop: vec![],
+                prompt_tokens: 0,
+                repair_fn: None,
+                tag_config: default_tag_config(),
+            },
         )))
         .await;
         println!("\n=== STREAM CHUNKS (tool_search_and_open) ===");
@@ -901,11 +956,14 @@ mod tests {
         let chunks = collect_chunks(super::sse_stream(super::stream(
             bytes_stream,
             "m".into(),
-            false,
-            true,
-            vec![],
-            0,
-            None,
+            super::StreamCfg {
+                include_usage: false,
+                include_obfuscation: true,
+                stop: vec![],
+                prompt_tokens: 0,
+                repair_fn: None,
+                tag_config: default_tag_config(),
+            },
         )))
         .await;
         println!("\n=== STREAM CHUNKS (include_obfuscation) ===");
@@ -959,9 +1017,20 @@ mod tests {
             None,
         );
         let stream = futures::stream::iter(frames);
-        let resp = aggregate(stream, "deepseek-default".into(), vec![], 0, None)
-            .await
-            .unwrap();
+        let resp = aggregate(
+            stream,
+            "deepseek-default".into(),
+            super::StreamCfg {
+                include_usage: false,
+                include_obfuscation: false,
+                stop: vec![],
+                prompt_tokens: 0,
+                repair_fn: None,
+                tag_config: default_tag_config(),
+            },
+        )
+        .await
+        .unwrap();
         let msg = &resp.choices[0].message;
         assert_eq!(msg.content.as_deref(), Some("好的，我来帮你。"));
         let calls = msg.tool_calls.as_ref().unwrap();
@@ -990,11 +1059,14 @@ mod tests {
         let chunks = collect_chunks(super::sse_stream(super::stream(
             bytes_stream,
             "m".into(),
-            false,
-            false,
-            vec![],
-            0,
-            None,
+            super::StreamCfg {
+                include_usage: false,
+                include_obfuscation: false,
+                stop: vec![],
+                prompt_tokens: 0,
+                repair_fn: None,
+                tag_config: default_tag_config(),
+            },
         )))
         .await;
         println!("\n=== STREAM CHUNKS (tool_calls with leading text, fragmented) ===");
@@ -1044,11 +1116,14 @@ mod tests {
         let chunks = collect_chunks(super::sse_stream(super::stream(
             bytes_stream,
             "m".into(),
-            false,
-            false,
-            vec![],
-            0,
-            None,
+            super::StreamCfg {
+                include_usage: false,
+                include_obfuscation: false,
+                stop: vec![],
+                prompt_tokens: 0,
+                repair_fn: None,
+                tag_config: default_tag_config(),
+            },
         )))
         .await;
         println!("\n=== STREAM CHUNKS (leading text + multi-chunk JSON fragments) ===");
@@ -1091,11 +1166,14 @@ mod tests {
         let chunks = collect_chunks(super::sse_stream(super::stream(
             bytes_stream,
             "m".into(),
-            false,
-            false,
-            vec![],
-            0,
-            None,
+            super::StreamCfg {
+                include_usage: false,
+                include_obfuscation: false,
+                stop: vec![],
+                prompt_tokens: 0,
+                repair_fn: None,
+                tag_config: default_tag_config(),
+            },
         )))
         .await;
         println!("\n=== STREAM CHUNKS (thinking + leading + fragmented JSON) ===");
@@ -1130,11 +1208,14 @@ mod tests {
         let chunks = collect_chunks(super::sse_stream(super::stream(
             bytes_stream,
             "m".into(),
-            false,
-            false,
-            vec![],
-            0,
-            None,
+            super::StreamCfg {
+                include_usage: false,
+                include_obfuscation: false,
+                stop: vec![],
+                prompt_tokens: 0,
+                repair_fn: None,
+                tag_config: default_tag_config(),
+            },
         )))
         .await;
         println!("\n=== STREAM CHUNKS (JSON split right after tool_call) ===");
@@ -1158,11 +1239,14 @@ mod tests {
         let chunks = collect_chunks(super::sse_stream(super::stream(
             bytes_stream,
             "deepseek-default".into(),
-            false,
-            false,
-            vec![],
-            0,
-            None,
+            super::StreamCfg {
+                include_usage: false,
+                include_obfuscation: false,
+                stop: vec![],
+                prompt_tokens: 0,
+                repair_fn: None,
+                tag_config: default_tag_config(),
+            },
         )))
         .await;
         println!("\n=== STREAM CHUNKS (tool_calls, no leading text) ===");

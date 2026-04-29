@@ -45,6 +45,7 @@ pub struct OpenAIAdapter {
     model_registry: std::collections::HashMap<String, String>,
     max_input_tokens: Vec<u32>,
     max_output_tokens: Vec<u32>,
+    tag_config: Arc<response::TagConfig>,
 }
 
 impl OpenAIAdapter {
@@ -58,6 +59,7 @@ impl OpenAIAdapter {
             model_registry,
             max_input_tokens: config.deepseek.max_input_tokens.clone(),
             max_output_tokens: config.deepseek.max_output_tokens.clone(),
+            tag_config: Arc::new(response::TagConfig::from_config(&config.deepseek.tool_call)),
         })
     }
 
@@ -135,11 +137,14 @@ impl OpenAIAdapter {
             let s = response::stream(
                 chat_resp.stream,
                 req.model,
-                norm.include_usage,
-                norm.include_obfuscation,
-                norm.stop,
-                prompt_tokens,
-                Some(repair_fn),
+                response::StreamCfg {
+                    include_usage: norm.include_usage,
+                    include_obfuscation: norm.include_obfuscation,
+                    stop: norm.stop,
+                    prompt_tokens,
+                    repair_fn: Some(repair_fn),
+                    tag_config: self.tag_config.clone(),
+                },
             );
             Ok(ChatResult {
                 data: ChatOutput::Stream(s),
@@ -150,9 +155,14 @@ impl OpenAIAdapter {
             let json = response::aggregate(
                 chat_resp.stream,
                 req.model,
-                norm.stop,
-                prompt_tokens,
-                Some(repair_fn),
+                response::StreamCfg {
+                    include_usage: true,
+                    include_obfuscation: false,
+                    stop: norm.stop,
+                    prompt_tokens,
+                    repair_fn: Some(repair_fn),
+                    tag_config: self.tag_config.clone(),
+                },
             )
             .await?;
             Ok(ChatResult {
@@ -258,10 +268,12 @@ impl OpenAIAdapter {
         let core = self.ds_core.clone();
         let req_id = request_id.to_string();
         let seq = Arc::new(AtomicU16::new(0));
+        let tag_config = self.tag_config.clone();
         Arc::new(move |tool_text: String| {
             let core = core.clone();
             let req_id = req_id.clone();
             let seq = seq.clone();
+            let tag_config = tag_config.clone();
             Box::pin(async move {
                 use crate::ds_core::ChatRequest;
                 let n = seq.fetch_add(1, Ordering::Relaxed);
@@ -287,7 +299,7 @@ impl OpenAIAdapter {
                     .v0_chat(req, &repair_req_id)
                     .await
                     .map_err(OpenAIAdapterError::from)?;
-                response::execute_tool_repair(resp.stream).await
+                response::execute_tool_repair(resp.stream, &tag_config).await
             })
         })
     }

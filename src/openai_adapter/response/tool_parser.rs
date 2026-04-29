@@ -1,12 +1,13 @@
-//! 工具调用解析 —— 滑动窗口检测 `<tool_call>...</tool_call>`，转换为结构化 tool_calls
+//! 工具调用解析 —— 滑动窗口检测 `<tool_calls>...</tool_calls>`，转换为结构化 tool_calls
 //!
 //! 算法核心：
 //! - Detecting 状态：维护固定宽度 W 的扫描缓冲区，新 chunk 到来时
-//!   先追加到缓冲区，扫描 `<tool_call>`，未找到则释放超出 W 的安全部分
-//! - CollectingXml 状态：检测到 `<tool_call>` 后收集内容直到 `</tool_call>`
+//!   先追加到缓冲区，扫描 `<tool_calls>`（或回退 `<tool_call>`），未找到则释放超出 W 的安全部分
+//! - CollectingXml 状态：检测到标记后收集内容直到 `</tool_calls>`
 //! - Done 状态：工具调用已发出，截断后续内容（防幻觉）
 
 use std::pin::Pin;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::task::{Context, Poll};
 
@@ -23,15 +24,57 @@ use crate::openai_adapter::types::{
 static CALL_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
 pub(crate) const MAX_XML_BUF_LEN: usize = 64 * 1024;
 
-/// 工具调用开始标记
-pub(crate) const TOOL_CALL_START: &str = "<tool_call>";
-/// 工具调用结束标记
-pub(crate) const TOOL_CALL_END: &str = "</tool_call>";
-/// 标记字节长度
-const TAG_LEN: usize = TOOL_CALL_START.len();
-/// 滑动扫描窗口大小 = 标记长度 + 安全余量
-/// 保证大 chunk 到来时不会将 `<tool_call>` 前缀挤出窗口
-const W: usize = TAG_LEN + 7;
+/// 工具调用开始标记（主：带 s）
+pub(crate) const TOOL_CALL_START: &str = "<tool_calls>";
+/// 工具调用结束标记（主）
+pub(crate) const TOOL_CALL_END: &str = "</tool_calls>";
+/// 滑动扫描窗口大小（安全上界：64 字节足够覆盖所有自定义标签）
+const W: usize = 71; // 64 + 7
+
+/// 工具调用标签配置（主标签 `<tool_calls>` 硬编码，此处只包含回退/自定义标签）
+#[derive(Debug, Clone)]
+pub struct TagConfig {
+    pub starts: Vec<String>,
+    pub ends: Vec<String>,
+}
+
+impl TagConfig {
+    /// 从配置文件加载回退标签
+    pub fn from_config(cfg: &crate::config::ToolCallTagConfig) -> Self {
+        Self {
+            starts: cfg.extra_starts.clone(),
+            ends: cfg.extra_ends.clone(),
+        }
+    }
+}
+
+pub(crate) fn contains_start_tag_with(s: &str, cfg: &TagConfig) -> bool {
+    s.contains(TOOL_CALL_START) || cfg.starts.iter().any(|t| s.contains(t.as_str()))
+}
+
+pub(crate) fn find_start_tag_with<'a>(s: &'a str, cfg: &TagConfig) -> Option<(usize, &'a str)> {
+    if let Some(pos) = s.find(TOOL_CALL_START) {
+        return Some((pos, &s[pos..pos + TOOL_CALL_START.len()]));
+    }
+    for start in &cfg.starts {
+        if let Some(pos) = s.find(start.as_str()) {
+            return Some((pos, &s[pos..pos + start.len()]));
+        }
+    }
+    None
+}
+
+pub(crate) fn find_end_tag_with<'a>(s: &'a str, cfg: &TagConfig) -> Option<(usize, &'a str)> {
+    if let Some(pos) = s.find(TOOL_CALL_END) {
+        return Some((pos, &s[pos..pos + TOOL_CALL_END.len()]));
+    }
+    for end in &cfg.ends {
+        if let Some(pos) = s.find(end.as_str()) {
+            return Some((pos, &s[pos..pos + end.len()]));
+        }
+    }
+    None
+}
 
 fn next_call_id() -> String {
     let n = CALL_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -137,20 +180,25 @@ fn repair_json(s: &str) -> Option<String> {
     None
 }
 
-/// 解析 `<tool_call>...</tool_call>` 中的 JSON 数组，返回结构化 ToolCall 列表
+/// 解析 `<tool_calls>...</tool_calls>` 中的 JSON 数组，返回结构化 ToolCall 列表
 ///
 /// 标记内格式为 JSON 数组：
-/// `<tool_call>[{"name": "get_weather", "arguments": {"city": "北京"}}]</tool_call>`
+/// `<tool_calls>[{"name": "get_weather", "arguments": {"city": "北京"}}]</tool_calls>`
+/// 兼容自定义回退标签。
 pub fn parse_tool_calls(xml: &str) -> Option<(Vec<ToolCall>, String)> {
-    let start = xml.find(TOOL_CALL_START)?;
-    let after_start = start + TOOL_CALL_START.len();
+    parse_tool_calls_with(xml, &TagConfig::from_config(&Default::default()))
+}
+
+pub fn parse_tool_calls_with(xml: &str, cfg: &TagConfig) -> Option<(Vec<ToolCall>, String)> {
+    let (start, start_tag) = find_start_tag_with(xml, cfg)?;
+    let after_start = start + start_tag.len();
 
     if is_inside_code_fence(xml, start) {
         return None;
     }
 
-    let (end, inner_end) = match xml.find(TOOL_CALL_END) {
-        Some(pos) => (pos + TOOL_CALL_END.len(), pos),
+    let (end, inner_end) = match find_end_tag_with(xml, cfg) {
+        Some((pos, matched_end)) => (pos + matched_end.len(), pos),
         None => (xml.len(), xml.len()),
     };
     let inner = &xml[after_start..inner_end];
@@ -255,11 +303,12 @@ pin_project! {
         model: String,
         finish_emitted: bool,
         repair_pending: Option<String>,
+        tag_config: Arc<TagConfig>,
     }
 }
 
 impl<S> ToolCallStream<S> {
-    pub fn new(inner: S, model: String) -> Self {
+    pub fn new(inner: S, model: String, tag_config: Arc<TagConfig>) -> Self {
         Self {
             inner,
             state: ToolParseState::Detecting {
@@ -268,6 +317,7 @@ impl<S> ToolCallStream<S> {
             model,
             finish_emitted: false,
             repair_pending: None,
+            tag_config,
         }
     }
 }
@@ -306,17 +356,22 @@ where
                             ToolParseState::Detecting { buffer } => {
                                 buffer.push_str(&content);
 
-                                if let Some(pos) = buffer.find(TOOL_CALL_START) {
+                                if let Some((pos, matched_start)) =
+                                    find_start_tag_with(buffer, this.tag_config)
+                                {
                                     debug!(
                                         target: "adapter",
-                                        "tool_parser 检测到 {TOOL_CALL_START}，缓冲区大小={}",
+                                        "tool_parser 检测到 {}，缓冲区大小={}",
+                                        matched_start,
                                         buffer.len()
                                     );
                                     let before = buffer[..pos].to_string();
                                     let rest = std::mem::take(buffer)[pos..].to_string();
 
-                                    if let Some(end_pos) = rest.find(TOOL_CALL_END) {
-                                        let end_abs = end_pos + TOOL_CALL_END.len();
+                                    if let Some((end_pos, matched_end)) =
+                                        find_end_tag_with(&rest, this.tag_config)
+                                    {
+                                        let end_abs = end_pos + matched_end.len();
                                         let collected = &rest[..end_abs];
 
                                         if let Some((calls, _)) = parse_tool_calls(collected) {
@@ -388,8 +443,10 @@ where
                                     choice.delta.content = Some(flushed);
                                     return Poll::Ready(Some(Ok(chunk)));
                                 }
-                                if let Some(end_pos) = buf.find(TOOL_CALL_END) {
-                                    let end_abs = end_pos + TOOL_CALL_END.len();
+                                if let Some((end_pos, end_tag)) =
+                                    find_end_tag_with(buf, this.tag_config)
+                                {
+                                    let end_abs = end_pos + end_tag.len();
                                     let collected = buf[..end_abs].to_string();
                                     let _tail = buf.split_off(end_abs);
 

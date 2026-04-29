@@ -27,8 +27,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **e2e 测试套件增强**：实时进度展示、`--show-output` 参数显示模型输出、`--filter` 支持多个关键词、
   汇总表增加端点列、使用完整模型 ID
 - **README 中英文同步**：新增文件上传功能说明、能力开关示例、e2e CLI 参数文档
-
-### Changed
+- **主标签改为 `<tool_calls>`**：从 `<tool_call>`（无 s）改为带 s 版本，更贴近模型自然输出
+- **回退标签分离**：`FALLBACK_STARTS` 和 `FALLBACK_ENDS` 独立数组，不要求成对匹配；
+  支持从 `config.toml` 配置额外幻觉标签，默认值统一在 `config.rs`
+- **`stream()` / `aggregate()` 参数精简**：合并为 `StreamCfg` 结构体，参数从 8 个减至 3 个
+- **mermaid 架构图同步**：标注文件提取和文档映射步骤
 - **Prompt 格式重构**：从 ChatML（`<|im_start|>` / `<|im_end|>`）迁移到 DeepSeek 原生标签格式
   （`<｜{Role}｜>{content}\n`），`role_tag` 改为首字母大写而非映射表
 - **Reminder 注入方式变更**：从独立的 `<|im_start|>reminder` 块改为嵌入最后一个

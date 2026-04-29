@@ -260,7 +260,7 @@ flowchart TB
         direction TB
         Q1["ChatCompletionsRequest"]:::openai_adapter
         Q2["参数校验 + 默认值"]:::step
-        Q3["工具定义提取 + 注入提示词"]:::step
+        Q3["工具/文件提取 + 注入提示词"]:::step
         Q4["DeepSeek 原生标签提示词构建"]:::step
         Q5["模型映射 + 能力开关"]:::step
         Q6["限流重试<br/>指数退避 1s→2s→4s→8s→16s"]:::step
@@ -308,7 +308,7 @@ flowchart TB
     subgraph RQ ["请求处理"]
         direction TB
         Q1["MessagesRequest"]:::anth
-        Q2["消息展开<br/>System 前置 / 文本合并 / 图片映射"]:::step
+        Q2["消息展开<br/>System 前置 / 文本合并 / 图片/文档映射"]:::step
         Q3["工具映射<br/>ToolUnion → OpenAI Tool"]:::step
         Q4["能力开关映射<br/>thinking → reasoning_effort"]:::step
         Q5["ChatCompletionsRequest"]:::oai

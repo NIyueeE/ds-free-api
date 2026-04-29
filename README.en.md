@@ -261,7 +261,7 @@ flowchart TB
         direction TB
         Q1["ChatCompletionsRequest"]:::openai_adapter
         Q2["Validation + Defaults"]:::step
-        Q3["Tool Extraction + Prompt Injection"]:::step
+        Q3["Tool/File Extraction + Prompt Injection"]:::step
         Q4["DeepSeek Native Tag Prompt Building"]:::step
         Q5["Model Resolution + Feature Toggles"]:::step
         Q6["Rate Limit Retry<br/>Exponential Backoff 1s→2s→4s→8s→16s"]:::step
@@ -310,7 +310,7 @@ flowchart TB
     subgraph RQ ["Request Pipeline"]
         direction TB
         Q1["MessagesRequest"]:::anth
-        Q2["Message Expansion<br/>System Prepend / Text Merge / Image Mapping"]:::step
+        Q2["Message Expansion<br/>System Prepend / Text Merge / Image/Doc Mapping"]:::step
         Q3["Tool Mapping<br/>ToolUnion → OpenAI Tool"]:::step
         Q4["Feature Mapping<br/>thinking → reasoning_effort"]:::step
         Q5["ChatCompletionsRequest"]:::oai

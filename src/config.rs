@@ -58,6 +58,37 @@ pub struct DeepSeekConfig {
     /// 各模型类型的输出 token 限制（与 model_types 按索引一一对应）
     #[serde(default = "default_max_output_tokens")]
     pub max_output_tokens: Vec<u32>,
+    /// 工具调用标签配置（自定义回退标签）
+    #[serde(default)]
+    pub tool_call: ToolCallTagConfig,
+}
+
+/// 工具调用自定义回退标签（内置 `<tool_calls>`，此处只加模型幻觉变体）
+#[derive(Debug, Clone, Deserialize)]
+pub struct ToolCallTagConfig {
+    /// 回退开始标签列表（内置：`<tool_call>` / `<function>`，用户可追加）
+    #[serde(default = "default_tool_call_starts")]
+    pub extra_starts: Vec<String>,
+    /// 回退结束标签列表（内置：`</tool_call>` / `</function>`，用户可追加）
+    #[serde(default = "default_tool_call_ends")]
+    pub extra_ends: Vec<String>,
+}
+
+impl Default for ToolCallTagConfig {
+    fn default() -> Self {
+        Self {
+            extra_starts: default_tool_call_starts(),
+            extra_ends: default_tool_call_ends(),
+        }
+    }
+}
+
+fn default_tool_call_starts() -> Vec<String> {
+    vec!["<tool_call>".into(), "<function>".into()]
+}
+
+fn default_tool_call_ends() -> Vec<String> {
+    vec!["</tool_call>".into(), "</function>".into()]
 }
 
 impl Default for DeepSeekConfig {
@@ -71,6 +102,7 @@ impl Default for DeepSeekConfig {
             model_types: default_model_types(),
             max_input_tokens: default_max_input_tokens(),
             max_output_tokens: default_max_output_tokens(),
+            tool_call: ToolCallTagConfig::default(),
         }
     }
 }
