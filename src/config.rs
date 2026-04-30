@@ -84,11 +84,23 @@ impl Default for ToolCallTagConfig {
 }
 
 fn default_tool_call_starts() -> Vec<String> {
-    vec!["<tool_call>".into(), "<function>".into()]
+    vec![
+        "<tool_call>".into(),
+        "<function>".into(),
+        "<function_calls>".into(),
+        "<|tool_calls|>".into(),
+        "<function-call>".into(),
+    ]
 }
 
 fn default_tool_call_ends() -> Vec<String> {
-    vec!["</tool_call>".into(), "</function>".into()]
+    vec![
+        "</tool_call>".into(),
+        "</function>".into(),
+        "</function_calls>".into(),
+        "</|tool_calls|>".into(),
+        "</function-call>".into(),
+    ]
 }
 
 impl Default for DeepSeekConfig {

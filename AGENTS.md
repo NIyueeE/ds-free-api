@@ -59,18 +59,19 @@ src/
 ├── openai_adapter/
 │   ├── types.rs                 # OpenAI protocol types (request + response structs)
 │   ├── models.rs                # Model list/get endpoints
-│   ├── request.rs               # Request parsing facade: AdapterRequest, parse(); declares normalize/ prompt/ resolver/ tools
+│   ├── request.rs               # Request parsing facade; declares normalize/ prompt/ resolver/ tools/ files
 │   ├── request/
 │   │   ├── normalize.rs         # Request normalization/validation
-│   │   ├── prompt.rs            # ChatML prompt construction (<|im_start|>/<|im_end|>)
+│   │   ├── prompt.rs            # DeepSeek native tag prompt construction (<｜User｜>/<｜Assistant｜>)
 │   │   ├── resolver.rs          # Model name to internal type resolution
-│   │   └── tools.rs             # Tool definition extraction and injection
+│   │   ├── tools.rs             # Tool definition extraction and injection
+│   │   └── files.rs             # File/Image content part to FilePayload extraction
 │   ├── response.rs              # Response conversion facade: stream(), aggregate(); declares sse_parser/ state/ converter/ tool_parser
 │   └── response/
 │       ├── sse_parser.rs        # SSE byte stream to DsFrame event stream
 │       ├── state.rs             # DeepSeek patch state machine
 │       ├── converter.rs         # DsFrame to OpenAI chunk conversion
-│       └── tool_parser.rs       # XML <tool_calls> detection/parse
+│       └── tool_parser.rs       # XML <tool_calls> detection/parse + TagConfig
 ├── anthropic_compat.rs          # Anthropic compat facade: AnthropicCompat, AnthropicCompatError, StreamResponse
 ├── anthropic_compat/
 │   ├── models.rs                # Anthropic model list/get (translates from OpenAI format)
@@ -134,9 +135,9 @@ pipeline — no intermediate `AdapterRequest` or `prepare` step:
 
 ```
 ChatCompletionsRequest
-  → functions/funcation_call 兼容
   → normalize::apply |
   → tools::extract   | 每个子函数直接读 ChatCompletionsRequest 的字段
+  → files::extract   |
   → prompt::build    |
   → resolver::resolve|
   → tiktoken
@@ -173,7 +174,7 @@ External files from the request (`ChatRequest.files`) are uploaded individually 
 
 ### Request Pipeline (OpenAI)
 ```
-JSON body → serde deserialize → normalize (validation/defaults) → tools extract → prompt build (ChatML) → resolver (model mapping) → ChatRequest
+JSON body → serde deserialize → normalize (validation/defaults) → tools extract → prompt build (DeepSeek native tags) → resolver (model mapping) → ChatRequest
 ```
 
 ### Response Pipeline (OpenAI)
@@ -189,7 +190,7 @@ The adapter maps OpenAI request fields to DeepSeek internal flags in `request/re
 - **Web search**: `web_search_options` enables search when present; omitted by default (search off).
 
 ### Prompt Injection Strategy
-The adapter converts OpenAI ChatML (`<|im_start|>` / `<|im_end|>`) into DeepSeek native tags (`<｜User｜>` / `<｜Assistant｜>` / `<｜Tool｜>` etc.) and embeds system instructions (tool definitions, format requirements) inside a `<think>` block. This approach was validated through iterative testing against claude-3.5-sonnet system prompt patterns — see `docs/deepseek-prompt-injection.md` for the full research history and alternative approaches considered.
+The adapter builds the prompt directly using DeepSeek native tags (`<｜User｜>` / `<｜Assistant｜>` / `<｜Tool｜>` etc.) and embeds system instructions (tool definitions, format requirements, reminder) inside a `<think>` block appended to the last assistant turn. This approach was validated through iterative testing against claude-3.5-sonnet system prompt patterns — see `docs/deepseek-prompt-injection.md` for the full research history and alternative approaches considered.
 
 ### Anthropic Compatibility Layer
 The Anthropic compat layer (`anthropic_compat/`) is a **pure protocol translator** that sits on top of `openai_adapter`:
@@ -207,6 +208,8 @@ The Anthropic compat layer (`anthropic_compat/`) is a **pure protocol translator
 
 **Tool `type` compatibility**: Claude Code may omit the `type` field in tool definitions. `ToolUnion` in `request.rs` implements a custom `Deserialize` that defaults to `Custom` when `type` is absent.
 
+**Document content block**: `ContentBlock::Document` is supported — base64 documents are mapped to OpenAI `file` content parts (uploaded as data URLs), and URL documents trigger web search mode (same as `image_url` HTTP links).
+
 ### Error Translation Chain
 Errors propagate upward with translation at module boundaries:
 1. `client.rs`: `ClientError` (HTTP, business errors, JSON parse)
@@ -219,12 +222,19 @@ Errors propagate upward with translation at module boundaries:
 `client.rs` parses DeepSeek's wrapper envelope `{code, msg, data: {biz_code, biz_msg, biz_data}}` via `Envelope::into_result()`.
 
 ### Prompt Token Calculation
-DeepSeek's free API returns `0` for `prompt_tokens`. The adapter computes this server-side in `request.rs` using `tiktoken-rs` with the `cl100k_base` tokenizer (same family as GPT-4). The count is stored in `AdapterRequest.prompt_tokens`, passed through `handlers.rs`, and injected into the final `Usage` object in `converter.rs` for both streaming and non-streaming responses.
+DeepSeek's free API returns `0` for `prompt_tokens`. The adapter computes this server-side in `openai_adapter.rs` using `tiktoken-rs` with the `cl100k_base` tokenizer (same family as GPT-4). The count is stored in `StreamCfg.prompt_tokens` and injected into the final `Usage` object in `converter.rs` for both streaming and non-streaming responses.
 
 ### Tool Calls via XML
 The adapter injects tool definitions as natural language into the prompt and parses `<tool_calls>` XML in the response back into structured `tool_calls` JSON. Custom (non-function) tools with grammar/text format definitions are also supported. When a tool call is triggered, `finish_reason` may be `"tool_calls"` instead of `"stop"`.
 
 The `arguments` field in tool call responses is normalized to always be a JSON string (never an object), so downstream consumers receive a consistent type regardless of what DeepSeek returns.
+
+### Configurable Tool Call Tag Fallback
+The primary tag is `<tool_calls>` (with s). The system also supports configurable fallback tag arrays:
+- **`TagConfig.extra_starts`**: hardcoded defaults `["<tool_call>", "<function>"]` + user config from `config.toml`
+- **`TagConfig.extra_ends`**: hardcoded defaults `["</tool_call>", "</function>"]` + user config
+- Default values live only in `config.rs` (single source of truth), loaded via `Arc<TagConfig>` and threaded through the stream pipeline via `StreamCfg`
+- Matching uses sliding-window prefix/suffix search against the full tag array, no paired tuples required
 
 ### Obfuscation
 Random base64 padding in SSE chunks to reach a target response size (~512 bytes), controlled by `stream_options.include_obfuscation` (defaults to true).
@@ -260,9 +270,14 @@ Optional Bearer token auth via `[[server.api_tokens]]` in config; no auth when e
 | Task | Location | Notes |
 |------|----------|-------|
 | Config loading | `src/config.rs` | Single unified entry, `-c` flag support |
+| Config reference | `config.example.toml` | All fields documented with examples (authoritative) |
 | DeepSeek chat flow | `src/ds_core/` | accounts → pow → completions → client |
-| OpenAI request parsing | `src/openai_adapter/request/` | normalize → tools → prompt → resolver |
+| Chat orchestration + file upload | `src/ds_core/completions.rs` | `v0_chat()`, history splitting, upload retry, `GuardedStream` |
+| OpenAI request parsing | `src/openai_adapter/request/` | normalize → tools → files → prompt → resolver |
+| File upload extraction | `src/openai_adapter/request/files.rs` | data URL → FilePayload, HTTP URL → search mode |
 | OpenAI response conversion | `src/openai_adapter/response/` | sse_parser → state → converter → tool_parser |
+| Tool call tag config | `src/openai_adapter/response/tool_parser.rs` | `TagConfig` with extra_starts/extra_ends fallback arrays |
+| Stream pipeline config | `src/openai_adapter/response.rs` | `StreamCfg` struct (consolidates 8 stream params) |
 | Anthropic compat layer | `src/anthropic_compat/` | request mapping → openai_adapter → response mapping |
 | Anthropic streaming response | `src/anthropic_compat/response/stream.rs` | OpenAI SSE → Anthropic SSE event stream |
 | Anthropic aggregate response | `src/anthropic_compat/response/aggregate.rs` | OpenAI JSON → Anthropic JSON |

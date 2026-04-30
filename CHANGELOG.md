@@ -6,9 +6,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [0.2.5] - 2026-04-29
 
+### Added
+- **流式工具调用保活机制**：`CollectingXml` 和修复等待期间每 1s 发送空工具增量块
+  （OpenAI: `tool_calls[{index:0}]`，Anthropic: 持续 thinking 块 `"tool_calls..."`）
+- **XML `<invoke>` 格式解析**：直接解析 `<invoke name="..."><parameter>` 格式，无需修复管道
+- **修复模型工具定义注入**：修复请求携带工具列表，帮助从破碎文本推测正确参数
+- **修复模型 JSON 转义提示**：提醒修复模型对字符串值中的引号和换行符进行转义
+- **全链路日志追踪增强**：`<<<` / `>>>` 格式统一，覆盖 ds_core SSE → OpenAI chunk → Anthropic SSE 三层
+- **Anthropic Ping 事件支持**：`MessagesResponseChunk` 新增 `Ping` 变体
+
 ### Fixed
 - **文件上传错误处理分层**：历史文件（`EMPTY.txt`）上传失败时回退为完整 prompt 内联发送，
   不再静默丢失上下文；外部文件上传失败直接返回错误，不再静默跳过
+- **Anthropic 响应格式不对齐**：`message_start` 补回 `stop_reason: null` / `stop_sequence: null`；
+  `message_delta` 始终包含 `usage.output_tokens`（标准版 Anthropic 需要这些字段）
+- **Anthropic usage 始终为 0**：`stream_options.include_usage` 默认未设置导致 usage 丢失，
+  修复为 Anthropic 请求强制开启；ConverterStream 将 usage 合并到 finish chunk；
+  ToolCallStream Done 状态保留 usage
 
 ### Added
 - **Prompt 注入调研文档**：[`docs/deepseek-prompt-injection.md`](docs/deepseek-prompt-injection.md)，
@@ -20,6 +34,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **e2e 文件上传测试场景**：新增 6 个场景（OpenAI 文件/图片/HTTP 链接 + Anthropic 文档/图片/HTTP 链接）
 
 ### Changed
+- **智能搜索默认开启**：DeepSeek 后端在搜索模式下注入更强的系统提示词，提升工具调用遵循度
+- **工具调用标签回退扩展**：新增 `<function_calls>`、`<|tool_calls|>`、`<function-call>` 到默认回退；
+  开始标签支持部分匹配（不要求 `>`）；结束标签确认开始后只匹配对应的 `</xxx>` 和 `<xxx>`
+- **JSON 解析强化**：支持缺失 `]` 和 `}` 的未闭合 JSON，自动取至末尾或回退单对象解析
+- **工具调用规则强化**：新增 `**核心：**` 规则禁止工具调用前输出解释性文字；移除重复的包裹指令
+- **reminder 前缀优化**：`<think>` 块开头改为 `嗯，我刚刚被系统提醒需要遵循以下内容:`
+- **消息合并**：连续相同 role 的消息在 prompt 构建时自动合并，避免 DeepSeek 混淆
+- **工具示例格式优化**：单行 `<tool_calls>[JSON]</tool_calls>`；描述用 `~~~markdown`
 - **`format_part` 改进**：`image_url` HTTP URL 输出 `[请访问这个链接: {url}]` 替代无意义占位符；
   `file` content part 保留 `text` 描述字段
 - **`openai_adapter.rs`**：接入 `files::extract`，HTTP URL 时自动开启搜索模式
@@ -71,6 +93,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **响应类型重命名**：`ChatCompletion` → `ChatCompletionsResponse`，`ChatCompletionChunk` → `ChatCompletionsResponseChunk`，命名与请求端对齐
 
 ### Removed
+- **`KeepaliveStream`（HTTP 层保活）**：已从 `SseBody` 移除，保活逻辑下移到 `ToolCallStream`/`RepairStream`
+- **`<think>` 内包裹指令** `(工具调用请使用 ... 包裹。)` 已移除（与 rules 重复）
+- **Reasoning 重定向逻辑**：`Detecting`/`CollectingXml` 不再处理 `reasoning_content`
 - **`AdapterRequest` / `prepare` 函数**：被内联到 `chat_completions` 中
 - **`parse_request` 方法**：不再需要，外部直接 `serde_json::from_slice` 构造 `ChatCompletionsRequest`
 - **冗余单元测试**：删除 7 个重叠测试（`multimodal_user`、`tools_injection`、`tools_after_tool_role_message`、`function_call_none_ignores_functions`、`stream_true`、`aggregate_tool_calls_with_trailing_text`），合并 `stream_options_defaults`/`explicit` 为参数化测试

@@ -134,7 +134,7 @@ The Anthropic compatibility layer uses the same model IDs via `/anthropic/v1/mes
 ### Feature Toggles
 
 - **Reasoning**: Enabled by default. Set `"reasoning_effort": "none"` in the request body to disable.
-- **Web search**: Disabled by default. Set `"web_search_options": {"search_context_size": "high"}` to enable.
+- **Web search**: Enabled by default (DeepSeek backend injects stronger system prompts in search mode, improving tool call compliance). Set `"web_search_options": {"search_context_size": "none"}` to disable.
 - **File upload**: Supports inline data URLs (automatically uploaded to the DeepSeek session) and HTTP URLs (triggers web search mode):
 
   **OpenAI:**

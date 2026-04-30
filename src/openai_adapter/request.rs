@@ -252,13 +252,13 @@ mod tests {
     }
 
     #[test]
-    fn search_disabled_without_web_search_options() {
+    fn search_enabled_by_default() {
         let body = serde_json::json!({
             "model": "deepseek-default",
             "messages": [{ "role": "user", "content": "hi" }]
         });
         let req = parse_json(body).unwrap();
-        assert!(!req.search_enabled);
+        assert!(req.search_enabled);
     }
 
     // stop 序列与 stream_options 默认值
@@ -521,7 +521,7 @@ mod tests {
         let prompt = &req.prompt;
         // 工具定义应注入到最后一个 <｜Assistant｜><think> 块中
         assert!(
-            prompt.contains("<｜Assistant｜><think>我被系统提醒如下信息:"),
+            prompt.contains("<｜Assistant｜><think>嗯，我刚刚被系统提醒需要遵循以下内容:"),
             "工具定义应注入到 <think> 块中"
         );
         assert!(prompt.contains("## 工具调用"));

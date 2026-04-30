@@ -9,7 +9,7 @@ use crate::anthropic_compat::types::{
 use crate::openai_adapter::types::{
     ChatCompletionsRequest, ContentPart, FileContent, FunctionCall, FunctionDefinition,
     ImageUrlContent, Message, MessageContent as OaiMessageContent, NamedFunction, NamedToolChoice,
-    ResponseFormat, StopSequence, Tool, ToolCall, ToolChoice as OaiToolChoice,
+    ResponseFormat, StopSequence, StreamOptions, Tool, ToolCall, ToolChoice as OaiToolChoice,
 };
 
 // ============================================================================
@@ -86,7 +86,10 @@ pub fn into_chat_completions(req: MessagesRequest) -> ChatCompletionsRequest {
         seed: None,
         service_tier: None,
         store: None,
-        stream_options: None,
+        stream_options: Some(StreamOptions {
+            include_usage: true,
+            include_obfuscation: true,
+        }),
         top_logprobs: None,
         user: None,
         verbosity: None,

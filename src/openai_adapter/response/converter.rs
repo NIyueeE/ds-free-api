@@ -157,11 +157,14 @@ where
                     DsFrame::Status(status) if status == "FINISHED" && !*this.finished => {
                         trace!(target: "adapter", ">>> conv: finish=stop");
                         *this.finished = true;
-                        return Poll::Ready(Some(Ok(make_chunk(
-                            this.model,
-                            Delta::default(),
-                            Some("stop"),
-                        ))));
+                        // 将 usage 合并到 finish chunk，确保下游（如 Anthropic）能拿到 completion_tokens
+                        let mut chunk = make_chunk(this.model, Delta::default(), Some("stop"));
+                        if *this.include_usage
+                            && let Some(u) = this.usage_value.take()
+                        {
+                            chunk.usage = Some(make_usage(*this.prompt_tokens, u));
+                        }
+                        return Poll::Ready(Some(Ok(chunk)));
                     }
                     DsFrame::Status(_) => {}
                     DsFrame::Usage(u) => {
@@ -177,11 +180,13 @@ where
                     DsFrame::Finish if !*this.finished => {
                         trace!(target: "adapter", ">>> conv: finish=stop");
                         *this.finished = true;
-                        return Poll::Ready(Some(Ok(make_chunk(
-                            this.model,
-                            Delta::default(),
-                            Some("stop"),
-                        ))));
+                        let mut chunk = make_chunk(this.model, Delta::default(), Some("stop"));
+                        if *this.include_usage
+                            && let Some(u) = this.usage_value.take()
+                        {
+                            chunk.usage = Some(make_usage(*this.prompt_tokens, u));
+                        }
+                        return Poll::Ready(Some(Ok(chunk)));
                     }
                     DsFrame::Finish => {}
                 },

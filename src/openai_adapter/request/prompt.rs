@@ -8,10 +8,71 @@ use super::tools::ToolContext;
 use crate::openai_adapter::response::{TOOL_CALL_END, TOOL_CALL_START};
 use crate::openai_adapter::types::{ChatCompletionsRequest, ContentPart, Message, MessageContent};
 
+/// 合并连续相同 role 的 message，避免 DeepSeek 模型对连续同角色标签产生混淆
+fn merge_messages(messages: &[Message]) -> Vec<Message> {
+    let mut merged: Vec<Message> = Vec::new();
+    for msg in messages {
+        if let Some(last) = merged.last_mut()
+            && last.role == msg.role
+        {
+            // 合并 content
+            if let Some(ref content) = msg.content {
+                match &mut last.content {
+                    Some(last_content) => match (last_content, content) {
+                        (MessageContent::Text(a), MessageContent::Text(b)) => {
+                            a.push('\n');
+                            a.push_str(b);
+                        }
+                        (MessageContent::Parts(a), MessageContent::Parts(b)) => {
+                            a.extend(b.clone());
+                        }
+                        // 不同类型 → 都转 text 拼接
+                        (last_c, new_c) => {
+                            let new_text = format_content(new_c);
+                            let last_text = format_content(last_c);
+                            *last_c = MessageContent::Text(format!("{}\n{}", last_text, new_text));
+                        }
+                    },
+                    None => {
+                        last.content = msg.content.clone();
+                    }
+                }
+            }
+            // 合并 tool_calls
+            if let Some(ref calls) = msg.tool_calls {
+                match &mut last.tool_calls {
+                    Some(last_calls) => last_calls.extend(calls.clone()),
+                    None => last.tool_calls = msg.tool_calls.clone(),
+                }
+            }
+            // 覆盖字段：取最后一条的值
+            if msg.name.is_some() {
+                last.name.clone_from(&msg.name);
+            }
+            if msg.tool_call_id.is_some() {
+                last.tool_call_id.clone_from(&msg.tool_call_id);
+            }
+            if msg.function_call.is_some() {
+                last.function_call.clone_from(&msg.function_call);
+            }
+            if msg.refusal.is_some() {
+                last.refusal.clone_from(&msg.refusal);
+            }
+            if msg.audio.is_some() {
+                last.audio.clone_from(&msg.audio);
+            }
+            continue;
+        }
+        merged.push(msg.clone());
+    }
+    merged
+}
+
 /// 构建 DeepSeek 原生标签格式的 prompt 字符串
-/// 顺序: [system] [历史 user/tool/assistant 轮次...] <｜Assistant｜><think>[reminder]
+/// 顺序: [system(含 reminder)] [历史 user/tool/assistant 轮次...] <｜Assistant｜><think>[reminder]
 pub fn build(req: &ChatCompletionsRequest, tool_ctx: &ToolContext) -> String {
-    let mut parts: Vec<String> = req.messages.iter().map(format_message).collect();
+    let messages = merge_messages(&req.messages);
+    let mut parts: Vec<String> = messages.iter().map(format_message).collect();
 
     let mut tool_sections: Vec<String> = Vec::new();
 
@@ -61,16 +122,67 @@ pub fn build(req: &ChatCompletionsRequest, tool_ctx: &ToolContext) -> String {
         }
     }
 
-    // 工具调用包裹指令
-    if tool_ctx.defs_text.is_some() {
-        reminder_parts.push(format!(
-            "(工具调用请使用 {TOOL_CALL_START} 和 {TOOL_CALL_END} 包裹。)"
-        ));
-    }
-
     if !reminder_parts.is_empty() {
-        let reminder = format!("我被系统提醒如下信息:\n\n{}", reminder_parts.join("\n\n"));
-        parts.push(format!("<｜Assistant｜><think>{}\n", reminder));
+        let reminder_body = reminder_parts.join("\n\n");
+
+        // System 尾部注入完整 reminder（不含"嗯"前缀，含工具定义）
+        let sys_content = format!("\n\n{}", reminder_body);
+        if let Some(sys) = parts.iter_mut().find(|p| p.starts_with("<｜System｜>")) {
+            if let Some(end) = sys.rfind('\n') {
+                sys.insert_str(end, &sys_content);
+            }
+        } else {
+            parts.insert(0, format!("<｜System｜>{}<｜System｜>\n", sys_content));
+        }
+
+        // <think> 中不含工具定义，只含格式规范和调用指令
+        let mut think_sections: Vec<String> = Vec::new();
+        if let Some(text) = tool_ctx.format_block.as_deref() {
+            think_sections.push(format!("### 格式规范\n{}", text));
+        }
+        if let Some(text) = tool_ctx.instruction_text.as_deref() {
+            think_sections.push(format!("### 调用指令\n{}", text));
+        }
+        let mut think_parts: Vec<String> = Vec::new();
+        if !think_sections.is_empty() {
+            think_parts.push(format!("## 工具调用\n{}", think_sections.join("\n\n")));
+        }
+        // response_format only in think
+        if let Some(rf) = &req.response_format {
+            let text = match rf.ty.as_str() {
+                "json_object" => {
+                    "请直接输出合法的 JSON 对象，不要包含任何 markdown 代码块标记或其他解释性文字。"
+                        .into()
+                }
+                "json_schema" => {
+                    let schema_text = rf
+                        .json_schema
+                        .as_ref()
+                        .map(|s| serde_json::to_string(s).unwrap_or_default())
+                        .unwrap_or_default();
+                    if schema_text.is_empty() {
+                        "以 JSON 的形式输出。".into()
+                    } else {
+                        format!(
+                            "以 JSON 的形式输出，输出的 JSON 需遵守以下的格式：\n\n~~~json\n{}\n~~~",
+                            schema_text
+                        )
+                    }
+                }
+                "text" => String::new(),
+                _ => format!("请以 {} 格式输出。", rf.ty),
+            };
+            if !text.is_empty() {
+                think_parts.push(format!("## 输出格式\n{}", text));
+            }
+        }
+        if !think_parts.is_empty() {
+            let think_reminder = format!(
+                "嗯，我刚刚被系统提醒需要遵循以下内容:\n\n{}",
+                think_parts.join("\n\n")
+            );
+            parts.push(format!("<｜Assistant｜><think>{}\n", think_reminder));
+        }
     }
 
     parts.join("")

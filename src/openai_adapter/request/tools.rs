@@ -192,7 +192,7 @@ fn format_function(func: &FunctionDefinition) -> Result<String, String> {
     let desc_block = if desc.is_empty() {
         "  无描述".to_string()
     } else {
-        format!("~~~\n  {}\n~~~\n", desc)
+        format!("~~~markdown\n  {}\n~~~\n", desc)
     };
     Ok(format!(
         "- **{}** (function):\n  - 调用方法: `{}`\n  - 简要说明:\n{}",
@@ -209,13 +209,17 @@ fn build_tool_instruction_block(req: &ChatCompletionsRequest) -> String {
     lines.push(String::new());
     lines.push("将 JSON 数组包裹在工具调用标记中：".into());
     lines.push(String::new());
-    lines.push(TOOL_CALL_START.into());
-    lines.push("[{\"name\": \"工具名\", \"arguments\": {参数JSON}}]".into());
-    lines.push(TOOL_CALL_END.into());
+    lines.push(format!(
+        "{TOOL_CALL_START}[{{\"name\": \"工具名\", \"arguments\": {{参数JSON}}}}]{TOOL_CALL_END}"
+    ));
     lines.push(String::new());
 
     // 规则
     lines.push("**规则：**".into());
+    lines.push(String::new());
+    lines.push(
+        "**核心：决定调用工具时，你的响应中只允许出现工具调用文本本身，禁止任何解释、前缀、总结、问候语等额外内容。**".into(),
+    );
     lines.push(String::new());
     lines.push(format!("1. JSON 数组必须以 `{TOOL_CALL_START}` 开头、以 `{TOOL_CALL_END}` 结尾，将数组**完整包裹**在标记内。"));
     lines.push("2. 所有工具调用必须放在**一个** JSON 数组中，多个调用用逗号分隔。".into());
@@ -223,11 +227,19 @@ fn build_tool_instruction_block(req: &ChatCompletionsRequest) -> String {
         "3. 输出 `{TOOL_CALL_END}` 后**立即停止**，不得添加后续文本、XML 标签或说明文字。"
     ));
     lines.push("4. 不要将工具调用包裹在 markdown 代码块中。".into());
-    lines.push("5. 只输出格式块本身，不要输出解释性文字。".into());
-    lines.push("6. 字符串参数值必须用**双引号**包裹（JSON 标准）。".into());
+    lines.push("5. 字符串参数值必须用**双引号**包裹（JSON 标准）。".into());
     lines.push(format!(
-        "7. 决定调用工具时，输出的**第一个非空白字符**必须是 `{TOOL_CALL_START}`。"
+        "6. 决定调用工具时，输出的**第一个非空白字符**必须是 `{TOOL_CALL_START}`。"
     ));
+    lines.push(
+        "7. 整个响应中**只能出现一个 `<tool_calls>` 块**，不要重复输出多个 `<tool_calls>`。".into(),
+    );
+    lines.push(
+        "8. **重复：整个响应中只能出现一个 `<tool_calls>` 块**，不要重复输出。如果你已经输出了一个 `<tool_calls>` 块，绝对不要再输出第二个。".into(),
+    );
+    lines.push(
+        "9. **重复：** 禁止在 `<tool_calls>` 之前输出任何文字，包括但不限于解释、确认、总结、问候语。".into(),
+    );
     lines.push(String::new());
 
     let tool_names: Vec<String> = req
@@ -245,12 +257,10 @@ fn build_tool_instruction_block(req: &ChatCompletionsRequest) -> String {
 
     // 示例A：单个工具
     lines.push("**示例A** — 调用一个工具：".into());
-    lines.push(TOOL_CALL_START.into());
     lines.push(format!(
-        "[{{\"name\": \"{a}\", \"arguments\": {}}}]",
+        "{TOOL_CALL_START}[{{\"name\": \"{a}\", \"arguments\": {}}}]{TOOL_CALL_END}",
         example_args(a)
     ));
-    lines.push(TOOL_CALL_END.into());
     lines.push(String::new());
 
     // 示例B：两个工具并行
@@ -261,9 +271,10 @@ fn build_tool_instruction_block(req: &ChatCompletionsRequest) -> String {
             .collect();
         lines.push("**示例B** — 同时调用多个工具（一个数组包含全部调用）：".into());
         lines.push(String::new());
-        lines.push(TOOL_CALL_START.into());
-        lines.push(format!("[{}]", items.join(", ")));
-        lines.push(TOOL_CALL_END.into());
+        lines.push(format!(
+            "{TOOL_CALL_START}[{}]{TOOL_CALL_END}",
+            items.join(", ")
+        ));
         lines.push(String::new());
     }
 
@@ -275,9 +286,10 @@ fn build_tool_instruction_block(req: &ChatCompletionsRequest) -> String {
             .collect();
         lines.push("**示例C** — 同时调用三个工具（所有调用在一个数组中）：".into());
         lines.push(String::new());
-        lines.push(TOOL_CALL_START.into());
-        lines.push(format!("[{}]", items.join(", ")));
-        lines.push(TOOL_CALL_END.into());
+        lines.push(format!(
+            "{TOOL_CALL_START}[{}]{TOOL_CALL_END}",
+            items.join(", ")
+        ));
         lines.push(String::new());
     }
 
@@ -286,12 +298,10 @@ fn build_tool_instruction_block(req: &ChatCompletionsRequest) -> String {
         let d_name = tool_names.first().map(|s| s.as_str()).unwrap_or("tool_a");
         lines.push("**示例D** — 参数值为嵌套对象/数组（仍然是标准 JSON）：".into());
         lines.push(String::new());
-        lines.push(TOOL_CALL_START.into());
         lines.push(format!(
-            "[{{\"name\": \"{d_name}\", \"arguments\": {}}}]",
+            "{TOOL_CALL_START}[{{\"name\": \"{d_name}\", \"arguments\": {}}}]{TOOL_CALL_END}",
             example_nested_args(d_name)
         ));
-        lines.push(TOOL_CALL_END.into());
         lines.push(String::new());
     }
 

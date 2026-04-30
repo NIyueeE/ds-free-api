@@ -91,6 +91,27 @@ impl StreamState {
     fn handle_chunk(&mut self, chunk: ChatCompletionsResponseChunk) -> Vec<MessagesResponseChunk> {
         let mut events = Vec::new();
 
+        // 保活块 → 持续 thinking 块（不要独立块免干扰客户端）
+        if chunk.id == "chatcmpl-keepalive" && self.started {
+            if self.block_kind != BlockKind::Thinking {
+                events.extend(self.transition_to(BlockKind::Thinking));
+                events.push(MessagesResponseChunk::ContentBlockStart {
+                    index: self.block_index,
+                    content_block: ResponseContentBlock::Thinking {
+                        thinking: String::new(),
+                        signature: String::new(),
+                    },
+                });
+            }
+            events.push(MessagesResponseChunk::ContentBlockDelta {
+                index: self.block_index,
+                delta: ContentBlockDelta::Thinking {
+                    thinking: "tool_calls...".to_string(),
+                },
+            });
+            return events;
+        }
+
         // role chunk → message_start（此时 chunk 已携带 prompt_tokens）
         if !self.started
             && let Some(choice) = chunk.choices.first()
@@ -104,15 +125,14 @@ impl StreamState {
             return events;
         }
 
+        // 优先提取 usage（可能独立 chunk 或与 finish 同 chunk）
+        if let Some(ref u) = chunk.usage {
+            self.completion_tokens = Some(u.completion_tokens);
+        }
+
         let choice = match chunk.choices.first() {
             Some(c) => c,
-            None => {
-                // usage-only chunk
-                if let Some(u) = chunk.usage {
-                    self.completion_tokens = Some(u.completion_tokens);
-                }
-                return events;
-            }
+            None => return events,
         };
 
         let delta = &choice.delta;
@@ -173,7 +193,6 @@ impl StreamState {
                 } else {
                     (String::new(), "{}".to_string())
                 };
-                trace!(target: "anthropic_compat::response::stream", "tool_use block: id={}, name={}, partial_json={}", call.id, name, partial_json);
                 events.push(MessagesResponseChunk::ContentBlockStart {
                     index: self.block_index,
                     content_block: ResponseContentBlock::ToolUse {
@@ -204,7 +223,7 @@ impl StreamState {
             events.push(MessagesResponseChunk::MessageDelta {
                 stop_reason: Some(stop_reason),
                 stop_sequence: None,
-                output_tokens: self.completion_tokens,
+                output_tokens: Some(self.completion_tokens.unwrap_or(0)),
             });
             events.push(MessagesResponseChunk::MessageStop);
         }
@@ -254,7 +273,8 @@ where
         loop {
             match this.inner.as_mut().poll_next(cx) {
                 Poll::Ready(Some(Ok(chunk))) => {
-                    trace!(target: "anthropic_compat::response::stream", "收到 chunk");
+                    trace!(target: "anthropic_compat::response::stream", "<<< {}",
+                        serde_json::to_string(&chunk).unwrap_or_default());
                     let events = this.state.handle_chunk(chunk);
                     this.pending_events.extend(events);
                     if !this.pending_events.is_empty() {
@@ -275,7 +295,7 @@ where
                         events.push(MessagesResponseChunk::MessageDelta {
                             stop_reason: None,
                             stop_sequence: None,
-                            output_tokens: this.state.completion_tokens,
+                            output_tokens: Some(this.state.completion_tokens.unwrap_or(0)),
                         });
                         events.push(MessagesResponseChunk::MessageStop);
                         this.pending_events.extend(events);

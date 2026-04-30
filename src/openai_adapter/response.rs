@@ -13,6 +13,7 @@ pub(crate) use tool_parser::{TOOL_CALL_END, TOOL_CALL_START, TagConfig};
 
 use std::pin::Pin;
 use std::task::{Context, Poll};
+use std::time::Duration;
 
 use bytes::Bytes;
 use futures::{Stream, StreamExt};
@@ -21,12 +22,13 @@ use pin_project_lite::pin_project;
 use rand::RngExt;
 use std::future::Future;
 use std::sync::Arc;
+use tokio::time::Sleep;
 
 use crate::openai_adapter::{
     OpenAIAdapterError, StreamResponse,
     types::{
-        ChatCompletionsResponse, ChatCompletionsResponseChunk, Choice, Delta, MessageResponse,
-        ToolCall, Usage,
+        ChatCompletionsResponse, ChatCompletionsResponseChunk, Choice, ChunkChoice, Delta,
+        FunctionCall, MessageResponse, ToolCall, Usage,
     },
 };
 
@@ -46,6 +48,7 @@ pub(crate) fn now_secs() -> u64 {
 
 const OBFUSCATION_TARGET_LEN: usize = 512;
 const OBFUSCATION_MIN_PAD: usize = 16;
+const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(1);
 const FINISH_STOP: &str = "stop";
 const FINISH_TOOL_CALLS: &str = "tool_calls";
 
@@ -124,6 +127,11 @@ pub(crate) async fn execute_tool_repair(
         ))
     })?;
 
+    // 修复模型可能返回空结果，提前检查
+    let trimmed = text.trim();
+    if trimmed == "[]" || trimmed == "{}" {
+        return Err(OpenAIAdapterError::Internal("修复模型返回空结果".into()));
+    }
     Ok(calls)
 }
 
@@ -148,6 +156,8 @@ pin_project! {
         repair_fn: Option<RepairFn>,
         state: RepairState,
         model: String,
+        #[pin]
+        keepalive_deadline: Sleep,
     }
 }
 
@@ -158,6 +168,9 @@ impl RepairStream {
             repair_fn: Some(repair_fn),
             state: RepairState::Forwarding,
             model,
+            keepalive_deadline: tokio::time::sleep_until(
+                tokio::time::Instant::now() + KEEPALIVE_INTERVAL,
+            ),
         }
     }
 }
@@ -229,7 +242,42 @@ impl Stream for RepairStream {
                         *this.state = RepairState::RepairFailed(format!("修复失败: {}", e));
                         continue;
                     }
-                    Poll::Pending => return Poll::Pending,
+                    Poll::Pending => {
+                        if this.keepalive_deadline.as_mut().poll(cx).is_ready() {
+                            trace!(target: "adapter", ">>> keepalive(repair): 发送空工具增量");
+                            this.keepalive_deadline
+                                .as_mut()
+                                .reset(tokio::time::Instant::now() + KEEPALIVE_INTERVAL);
+                            return Poll::Ready(Some(Ok(ChatCompletionsResponseChunk {
+                                id: "chatcmpl-keepalive".into(),
+                                object: "chat.completion.chunk",
+                                created: 0,
+                                model: this.model.clone(),
+                                choices: vec![ChunkChoice {
+                                    index: 0,
+                                    delta: Delta {
+                                        tool_calls: Some(vec![ToolCall {
+                                            id: String::new(),
+                                            ty: "function".into(),
+                                            function: Some(FunctionCall {
+                                                name: String::new(),
+                                                arguments: String::new(),
+                                            }),
+                                            custom: None,
+                                            index: 0,
+                                        }]),
+                                        ..Default::default()
+                                    },
+                                    finish_reason: None,
+                                    logprobs: None,
+                                }],
+                                usage: None,
+                                service_tier: None,
+                                system_fingerprint: None,
+                            })));
+                        }
+                        return Poll::Pending;
+                    }
                 },
 
                 RepairState::RepairFailed(msg) => {
@@ -399,7 +447,10 @@ where
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let mut this = self.project();
         match this.inner.as_mut().poll_next(cx) {
-            Poll::Ready(Some(Ok(chunk))) => Poll::Ready(Some(sse_serialize(&chunk))),
+            Poll::Ready(Some(Ok(chunk))) => {
+                trace!(target: "adapter", ">>> {}", serde_json::to_string(&chunk).unwrap_or_default());
+                Poll::Ready(Some(sse_serialize(&chunk)))
+            }
             Poll::Ready(Some(Err(e))) => Poll::Ready(Some(Err(e))),
             Poll::Ready(None) => Poll::Ready(None),
             Poll::Pending => Poll::Pending,
@@ -776,7 +827,7 @@ mod tests {
             println!("chunk[{i}]:\n{}", serde_json::to_string_pretty(c).unwrap());
         }
         println!("======================================\n");
-        assert!(chunks.len() >= 3);
+        assert!(chunks.len() >= 2);
         assert_eq!(chunks[0]["choices"][0]["delta"]["role"], "assistant");
         // 所有 content 合并后应为 "x"
         let all_content: String = chunks

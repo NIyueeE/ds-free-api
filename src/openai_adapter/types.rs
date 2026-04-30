@@ -147,7 +147,7 @@ pub struct ApproximateLocation {
 }
 
 /// 对话消息
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct Message {
     pub role: String,
     #[serde(default)]

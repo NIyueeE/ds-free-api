@@ -132,8 +132,24 @@ impl OpenAIAdapter {
         let chat_resp = self.try_chat(chat_req, request_id).await?;
         let account_id = chat_resp.account_id;
 
+        // 为修复模型准备工具定义信息
+        let tool_defs = req.tools.as_ref().map(|tools| {
+            tools
+                .iter()
+                .filter_map(|t| t.function.as_ref())
+                .map(|f| {
+                    format!(
+                        "- {}: {}",
+                        f.name,
+                        serde_json::to_string(&f.parameters).unwrap_or_default()
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        });
+
         if req.stream {
-            let repair_fn = self.create_repair_fn(request_id);
+            let repair_fn = self.create_repair_fn(request_id, tool_defs.clone());
             let s = response::stream(
                 chat_resp.stream,
                 req.model,
@@ -151,7 +167,7 @@ impl OpenAIAdapter {
                 account_id,
             })
         } else {
-            let repair_fn = self.create_repair_fn(request_id);
+            let repair_fn = self.create_repair_fn(request_id, tool_defs);
             let json = response::aggregate(
                 chat_resp.stream,
                 req.model,
@@ -263,27 +279,38 @@ impl OpenAIAdapter {
     }
 
     /// 创建 tool_calls 修复闭包，捕获 Arc<DeepSeekCore> 发起修复请求
-    pub(crate) fn create_repair_fn(&self, request_id: &str) -> response::RepairFn {
+    pub(crate) fn create_repair_fn(
+        &self,
+        request_id: &str,
+        tool_defs: Option<String>,
+    ) -> response::RepairFn {
         use std::sync::atomic::{AtomicU16, Ordering};
         let core = self.ds_core.clone();
         let req_id = request_id.to_string();
         let seq = Arc::new(AtomicU16::new(0));
         let tag_config = self.tag_config.clone();
+        let tools_info = tool_defs.unwrap_or_default();
         Arc::new(move |tool_text: String| {
             let core = core.clone();
             let req_id = req_id.clone();
             let seq = seq.clone();
             let tag_config = tag_config.clone();
+            let tools_info = tools_info.clone();
             Box::pin(async move {
                 use crate::ds_core::ChatRequest;
                 let n = seq.fetch_add(1, Ordering::Relaxed);
                 let repair_req_id = format!("{}-repair-{}", req_id, n);
-                let prompt = format!(
+                let mut prompt = String::new();
+                if !tools_info.is_empty() {
+                    prompt.push_str(&format!("可用的工具定义：\n{}\n\n", tools_info));
+                }
+                prompt.push_str(&format!(
                     "请将以下代码块中的内容提取并转换为合法的工具调用 JSON 数组。\
                      \n每个元素必须包含 \"name\"（字符串）和 \"arguments\"（对象）字段。\
                      \n只输出 JSON 数组本身，不要加 code fence，不要其他文字解释。\
+                     \n注意：字符串值中的引号和换行符必须用反斜杠转义（如 \\\" 和 \\n）。\
                      \n\n需要修复的内容：\n~~~\n{tool_text}\n~~~"
-                );
+                ));
                 let req = ChatRequest {
                     prompt,
                     thinking_enabled: false,

@@ -30,8 +30,8 @@ password = "pass3"
 
 [deepseek]
 # 工具调用标签配置（只追加模型幻觉的额外变体，内置 <tool_calls>）
-# tool_call.extra_starts = ["<tool_call>", "<function>"]
-# tool_call.extra_ends = ["</tool_call>", "</function>"]
+# tool_call.extra_starts = ["<tool_call>", "<function>", "<function_calls>", "<|tool_calls|>", "<function-call>"]
+# tool_call.extra_ends = ["</tool_call>", "</function>", "</function_calls>", "</|tool_calls|>", "</function-call>"]
 
 # 已验证通过的 User-Agent
 # user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36"

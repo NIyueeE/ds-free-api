@@ -312,7 +312,7 @@ impl Completions {
                 .map_err(|e| CoreError::Stream(e.to_string()))?;
             log::trace!(
                 target: "ds_core::accounts",
-                "req={} SSE chunk ({} bytes): {}", request_id, chunk.len(), String::from_utf8_lossy(&chunk)
+                "req={} <<< ({} bytes) {}", request_id, chunk.len(), String::from_utf8_lossy(&chunk)
             );
             buf.extend_from_slice(&chunk);
             text_buf.push_str(&String::from_utf8_lossy(&chunk));

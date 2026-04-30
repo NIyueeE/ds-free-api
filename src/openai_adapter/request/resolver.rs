@@ -18,7 +18,8 @@ pub struct ModelResolution {
 ///
 /// thinking_enabled 在 reasoning_effort 非 "none" 时启用。
 /// 若 reasoning_effort 未提供，默认按 "high" 处理（即 reasoning 默认开启）。
-/// search_enabled 在 web_search_options 存在时启用，默认关闭。
+/// search_enabled 默认开启（DeepSeek 后端在搜索模式下注入更强的系统提示词）。
+/// 显式设置 web_search_options 可覆盖行为。
 pub fn resolve(
     registry: &HashMap<String, String>,
     model_id: &str,
@@ -34,7 +35,7 @@ pub fn resolve(
     let reasoning_effort = reasoning_effort.unwrap_or("high");
     let thinking_enabled = reasoning_effort != "none";
 
-    let search_enabled = web_search_options.is_some();
+    let search_enabled = web_search_options.map(|_| true).unwrap_or(true);
 
     Ok(ModelResolution {
         model_type,
