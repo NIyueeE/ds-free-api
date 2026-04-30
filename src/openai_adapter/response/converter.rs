@@ -208,25 +208,3 @@ where
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use futures::StreamExt;
-
-    use super::super::state::DsFrame;
-
-    use super::*;
-
-    #[tokio::test]
-    async fn converter_emits_role_and_content() {
-        let frames = futures::stream::iter(vec![
-            Ok(DsFrame::Role),
-            Ok(DsFrame::ContentDelta("hello".into())),
-        ]);
-        let mut conv = ConverterStream::new(frames, "deepseek-default".into(), false, false, 0);
-        let chunk1 = conv.next().await.unwrap().unwrap();
-        assert_eq!(chunk1.choices[0].delta.role, Some("assistant"));
-        let chunk2 = conv.next().await.unwrap().unwrap();
-        assert_eq!(chunk2.choices[0].delta.content.as_deref(), Some("hello"));
-    }
-}

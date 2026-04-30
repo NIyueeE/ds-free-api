@@ -1,7 +1,7 @@
 //! Anthropic Messages API 请求类型定义
 //!
 //! 对齐 Anthropic Messages API 协议，保留全部兼容字段。
-//! 未消费的字段使用 `#[allow(dead_code)]` 字段级标注。
+//! 未消费的字段通过 `pub` 字段避免编译器 warning，与 openai_adapter/types.rs 对称。
 
 use bytes::Bytes;
 use log::trace;
@@ -29,7 +29,6 @@ pub struct MessagesRequest {
     pub temperature: Option<f32>,
     #[serde(default)]
     pub top_p: Option<f32>,
-    #[allow(dead_code)]
     #[serde(default)]
     pub top_k: Option<u32>,
     #[serde(default)]
@@ -38,7 +37,6 @@ pub struct MessagesRequest {
     pub tool_choice: Option<ToolChoice>,
     #[serde(default)]
     pub thinking: Option<ThinkingConfig>,
-    #[allow(dead_code)]
     #[serde(default)]
     pub metadata: Option<Metadata>,
     #[serde(default)]
@@ -48,16 +46,12 @@ pub struct MessagesRequest {
     pub web_search_options: Option<serde_json::Value>,
 
     // 兼容字段：解析但不消费
-    #[allow(dead_code)]
     #[serde(default)]
     pub cache_control: Option<CacheControlEphemeral>,
-    #[allow(dead_code)]
     #[serde(default)]
     pub container: Option<String>,
-    #[allow(dead_code)]
     #[serde(default)]
     pub inference_geo: Option<String>,
-    #[allow(dead_code)]
     #[serde(default)]
     pub service_tier: Option<String>,
 
@@ -112,13 +106,10 @@ pub enum ContentBlock {
         content: Option<ToolResultContent>,
     },
     Thinking {
-        #[allow(dead_code)]
         thinking: String,
-        #[allow(dead_code)]
         signature: String,
     },
     RedactedThinking {
-        #[allow(dead_code)]
         data: String,
     },
     // 其他类型（search_result / server_tool_use 等）直接忽略
@@ -157,7 +148,6 @@ pub enum SystemContent {
 pub struct SystemTextBlock {
     pub text: String,
     #[serde(rename = "type")]
-    #[allow(dead_code)]
     pub ty: String,
 }
 
@@ -247,9 +237,7 @@ pub enum ToolChoice {
 pub enum ThinkingConfig {
     #[serde(rename = "enabled")]
     Enabled {
-        #[allow(dead_code)]
         budget_tokens: u32,
-        #[allow(dead_code)]
         #[serde(default)]
         display: Option<String>,
     },
@@ -257,7 +245,6 @@ pub enum ThinkingConfig {
     Disabled,
     #[serde(rename = "adaptive")]
     Adaptive {
-        #[allow(dead_code)]
         #[serde(default)]
         display: Option<String>,
     },
@@ -267,14 +254,12 @@ pub enum ThinkingConfig {
 #[derive(Debug, Deserialize, Clone)]
 pub struct Metadata {
     #[serde(default)]
-    #[allow(dead_code)]
     pub user_id: Option<String>,
 }
 
 /// 输出配置
 #[derive(Debug, Deserialize, Clone)]
 pub struct OutputConfig {
-    #[allow(dead_code)]
     #[serde(default)]
     pub effort: Option<String>,
     #[serde(default)]
@@ -286,7 +271,6 @@ pub struct OutputConfig {
 pub struct JsonOutputFormat {
     pub schema: serde_json::Value,
     #[serde(rename = "type")]
-    #[allow(dead_code)]
     pub ty: String,
 }
 
@@ -294,10 +278,8 @@ pub struct JsonOutputFormat {
 #[derive(Debug, Deserialize, Clone)]
 pub struct CacheControlEphemeral {
     #[serde(rename = "type")]
-    #[allow(dead_code)]
     pub ty: String,
     #[serde(default)]
-    #[allow(dead_code)]
     pub ttl: Option<String>,
 }
 

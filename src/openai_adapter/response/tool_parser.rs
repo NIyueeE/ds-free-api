@@ -25,8 +25,8 @@ use crate::openai_adapter::types::{
 static CALL_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
 pub(crate) const MAX_XML_BUF_LEN: usize = 64 * 1024;
 
-pub(crate) const TOOL_CALL_START: &str = "<tool_calls>";
-pub(crate) const TOOL_CALL_END: &str = "</tool_calls>";
+pub(crate) const TOOL_CALL_START: &str = "<|tool▁calls▁begin|>";
+pub(crate) const TOOL_CALL_END: &str = "<|tool▁calls▁end|>";
 const W: usize = 71;
 
 const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(1);
@@ -94,27 +94,26 @@ pub(crate) fn find_end_tag_with<'a>(
             let abs = from + pos;
             return Some((abs, &s[abs..abs + close_tag.len()]));
         }
-        if let Some((pos, tag)) = match_start_tag(search, st) {
-            return Some((from + pos, &s[from + pos..from + pos + tag.len()]));
-        }
-    } else {
-        if let Some(pos) = search.find(TOOL_CALL_END) {
+    }
+
+    // 无论 start_tag 是否提供，都尝试已知结束标签
+    for end in std::iter::once(TOOL_CALL_END).chain(cfg.ends.iter().map(|s| s.as_str())) {
+        if let Some(pos) = search.find(end) {
             let abs = from + pos;
-            return Some((abs, &s[abs..abs + TOOL_CALL_END.len()]));
+            return Some((abs, &s[abs..abs + end.len()]));
         }
-        for end in &cfg.ends {
-            if let Some(pos) = search.find(end.as_str()) {
-                let abs = from + pos;
-                return Some((abs, &s[abs..abs + end.len()]));
-            }
-        }
-        if let Some((pos, tag)) = match_start_tag(search, TOOL_CALL_START) {
+    }
+    if let Some(st) = start_tag
+        && let Some((pos, tag)) = match_start_tag(search, st)
+    {
+        return Some((from + pos, &s[from + pos..from + pos + tag.len()]));
+    }
+    if let Some((pos, tag)) = match_start_tag(search, TOOL_CALL_START) {
+        return Some((from + pos, &s[from + pos..from + pos + tag.len()]));
+    }
+    for start in &cfg.starts {
+        if let Some((pos, tag)) = match_start_tag(search, start) {
             return Some((from + pos, &s[from + pos..from + pos + tag.len()]));
-        }
-        for start in &cfg.starts {
-            if let Some((pos, tag)) = match_start_tag(search, start) {
-                return Some((from + pos, &s[from + pos..from + pos + tag.len()]));
-            }
         }
     }
     None
@@ -892,7 +891,7 @@ mod tests {
         let xml = format!(
             "{TOOL_CALL_START}以下是工具调用：{{\"name\": \"f\", \"arguments\": {{}}}}{TOOL_CALL_END}"
         );
-        let (calls, remaining) = parse_tool_calls(&xml).unwrap();
+        let (_calls, remaining) = parse_tool_calls(&xml).unwrap();
         assert_eq!(remaining, "");
     }
 

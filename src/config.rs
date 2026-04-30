@@ -85,21 +85,19 @@ impl Default for ToolCallTagConfig {
 
 fn default_tool_call_starts() -> Vec<String> {
     vec![
+        "<|tool_calls_begin|>".into(),
+        "<|tool▁calls_begin|>".into(),
+        "<|tool_calls▁begin|>".into(),
         "<tool_call>".into(),
-        "<function>".into(),
-        "<function_calls>".into(),
-        "<|tool_calls|>".into(),
-        "<function-call>".into(),
     ]
 }
 
 fn default_tool_call_ends() -> Vec<String> {
     vec![
+        "<|tool_calls_end|>".into(),
+        "<|tool▁calls_end|>".into(),
+        "<|tool_calls▁end|>".into(),
         "</tool_call>".into(),
-        "</function>".into(),
-        "</function_calls>".into(),
-        "</|tool_calls|>".into(),
-        "</function-call>".into(),
     ]
 }
 

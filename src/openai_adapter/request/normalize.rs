@@ -4,7 +4,7 @@
 
 use crate::openai_adapter::types::{ChatCompletionsRequest, StopSequence};
 
-pub struct NormalizedParams {
+pub(crate) struct NormalizedParams {
     pub include_usage: bool,
     pub include_obfuscation: bool,
     pub stop: Vec<String>,
@@ -17,7 +17,7 @@ pub struct NormalizedParams {
 /// - messages 不能为空
 /// - role=tool 的消息必须包含 tool_call_id
 /// - role=function 的消息必须包含 name
-pub fn apply(req: &ChatCompletionsRequest) -> Result<NormalizedParams, String> {
+pub(crate) fn apply(req: &ChatCompletionsRequest) -> Result<NormalizedParams, String> {
     if req.model.trim().is_empty() {
         return Err("缺少必填字段 'model'".into());
     }

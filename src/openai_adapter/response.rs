@@ -79,7 +79,7 @@ type ChunkStream =
     Pin<Box<dyn Stream<Item = Result<ChatCompletionsResponseChunk, OpenAIAdapterError>> + Send>>;
 
 /// 工具调用修复闭包类型
-pub type RepairFn = Arc<
+pub(crate) type RepairFn = Arc<
     dyn Fn(
             String,
         )

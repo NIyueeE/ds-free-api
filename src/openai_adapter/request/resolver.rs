@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use crate::openai_adapter::types::WebSearchOptions;
 
 /// 模型解析结果
-pub struct ModelResolution {
+pub(crate) struct ModelResolution {
     /// ds_core 使用的 model_type
     pub model_type: String,
     pub thinking_enabled: bool,
@@ -20,7 +20,7 @@ pub struct ModelResolution {
 /// 若 reasoning_effort 未提供，默认按 "high" 处理（即 reasoning 默认开启）。
 /// search_enabled 默认开启（DeepSeek 后端在搜索模式下注入更强的系统提示词）。
 /// 显式设置 web_search_options 可覆盖行为。
-pub fn resolve(
+pub(crate) fn resolve(
     registry: &HashMap<String, String>,
     model_id: &str,
     reasoning_effort: Option<&str>,

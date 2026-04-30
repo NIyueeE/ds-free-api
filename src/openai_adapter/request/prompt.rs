@@ -14,6 +14,8 @@ fn merge_messages(messages: &[Message]) -> Vec<Message> {
     for msg in messages {
         if let Some(last) = merged.last_mut()
             && last.role == msg.role
+            && msg.role != "tool"
+        // tool 由 build() 分组合并
         {
             // 合并 content
             if let Some(ref content) = msg.content {
@@ -70,9 +72,32 @@ fn merge_messages(messages: &[Message]) -> Vec<Message> {
 
 /// 构建 DeepSeek 原生标签格式的 prompt 字符串
 /// 顺序: [system(含 reminder)] [历史 user/tool/assistant 轮次...] <｜Assistant｜><think>[reminder]
-pub fn build(req: &ChatCompletionsRequest, tool_ctx: &ToolContext) -> String {
+pub(crate) fn build(req: &ChatCompletionsRequest, tool_ctx: &ToolContext) -> String {
     let messages = merge_messages(&req.messages);
-    let mut parts: Vec<String> = messages.iter().map(format_message).collect();
+    let mut parts: Vec<String> = Vec::with_capacity(messages.len());
+    let mut i = 0;
+    while i < messages.len() {
+        if messages[i].role == "tool" {
+            let mut tool_contents = Vec::new();
+            while i < messages.len() && messages[i].role == "tool" {
+                if let Some(c) = &messages[i].content {
+                    tool_contents.push(format_content(c));
+                }
+                i += 1;
+            }
+            let inner: String = tool_contents
+                .iter()
+                .map(|c| format!("<｜tool▁output▁begin｜>{}<｜tool▁output▁end｜>", c))
+                .collect();
+            parts.push(format!(
+                "<｜tool▁outputs▁begin｜>{}<｜tool▁outputs▁end｜>",
+                inner
+            ));
+        } else {
+            parts.push(format_message(&messages[i]));
+            i += 1;
+        }
+    }
 
     let mut tool_sections: Vec<String> = Vec::new();
 
@@ -203,8 +228,17 @@ fn format_message(msg: &Message) -> String {
         "function" => format_function(msg),
         _ => format_generic(msg),
     };
-    let tag = role_tag(&msg.role);
-    format!("{}{}\n", tag, body)
+    let tag = if msg.role == "tool" {
+        String::new() // tool 用自有标签，不需要 <｜Tool｜>
+    } else {
+        role_tag(&msg.role)
+    };
+    let prefix = if msg.role == "user" {
+        "<｜end▁of▁sentence｜>"
+    } else {
+        ""
+    };
+    format!("{}{}{}", prefix, tag, body)
 }
 
 fn format_generic(msg: &Message) -> String {
@@ -260,21 +294,11 @@ fn format_assistant(msg: &Message) -> String {
 }
 
 fn format_tool(msg: &Message) -> String {
-    let mut parts = Vec::new();
-    parts.push("# 工具调用结果".to_string());
-    if let Some(name) = &msg.name {
-        parts.push(format!("## 工具名称: {}", name));
-    }
-    if let Some(id) = &msg.tool_call_id {
-        parts.push(format!("## 调用id: {}", id));
-    }
-    parts.push("## 调用结果:".to_string());
-    if let Some(content) = &msg.content {
-        parts.push("~~~".to_string());
-        parts.push(format_content(content));
-        parts.push("~~~".to_string());
-    }
-    parts.join("\n")
+    let content = msg.content.as_ref().map(format_content).unwrap_or_default();
+    format!(
+        "<｜tool▁outputs▁begin｜><｜tool▁output▁begin｜>{}<｜tool▁output▁end｜><｜tool▁outputs▁end｜>",
+        content
+    )
 }
 
 fn format_function(msg: &Message) -> String {

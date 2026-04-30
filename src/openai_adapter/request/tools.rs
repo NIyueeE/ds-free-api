@@ -10,7 +10,7 @@ use crate::openai_adapter::types::{
 };
 
 /// 提取后的工具上下文
-pub struct ToolContext {
+pub(crate) struct ToolContext {
     /// 格式模板 + 规则 + 示例（位于工具定义之前）
     pub format_block: Option<String>,
     /// 格式化后的工具定义文本
@@ -26,7 +26,7 @@ fn has_tools(req: &ChatCompletionsRequest) -> bool {
 /// 从请求中提取并校验工具信息
 ///
 /// 当 tool_choice 为 none 时返回空的 ToolContext，不生成任何注入文本。
-pub fn extract(req: &ChatCompletionsRequest) -> Result<ToolContext, String> {
+pub(crate) fn extract(req: &ChatCompletionsRequest) -> Result<ToolContext, String> {
     let default_choice = if has_tools(req) {
         ToolChoice::Mode("auto".to_string())
     } else {
@@ -231,15 +231,15 @@ fn build_tool_instruction_block(req: &ChatCompletionsRequest) -> String {
     lines.push(format!(
         "6. 决定调用工具时，输出的**第一个非空白字符**必须是 `{TOOL_CALL_START}`。"
     ));
-    lines.push(
-        "7. 整个响应中**只能出现一个 `<tool_calls>` 块**，不要重复输出多个 `<tool_calls>`。".into(),
-    );
-    lines.push(
-        "8. **重复：整个响应中只能出现一个 `<tool_calls>` 块**，不要重复输出。如果你已经输出了一个 `<tool_calls>` 块，绝对不要再输出第二个。".into(),
-    );
-    lines.push(
-        "9. **重复：** 禁止在 `<tool_calls>` 之前输出任何文字，包括但不限于解释、确认、总结、问候语。".into(),
-    );
+    lines.push(format!(
+        "7. 整个响应中**只能出现一个 `{TOOL_CALL_START}` 块**，不要重复输出多个 `{TOOL_CALL_START}` 块。"
+    ));
+    lines.push(format!(
+        "8. **重复：** 整个响应中只能出现一个 `{TOOL_CALL_START}` 块，不要重复输出。如果你已经输出了一个 `{TOOL_CALL_START}` 块，绝对不要再输出第二个。"
+    ));
+    lines.push(format!(
+        "9. **重复：** 禁止在 `{TOOL_CALL_START}` 之前输出任何文字，包括但不限于解释、确认、总结、问候语。"
+    ));
     lines.push(String::new());
 
     let tool_names: Vec<String> = req

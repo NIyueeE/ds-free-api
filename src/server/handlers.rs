@@ -13,8 +13,9 @@ use axum::{
 };
 use bytes::Bytes;
 
-use crate::anthropic_compat::types::MessagesRequest;
-use crate::anthropic_compat::{AnthropicCompat, AnthropicCompatError, AnthropicOutput};
+use crate::anthropic_compat::{
+    AnthropicCompat, AnthropicCompatError, AnthropicOutput, MessagesRequest,
+};
 use crate::openai_adapter::{
     ChatCompletionsRequest, ChatOutput, OpenAIAdapter, OpenAIAdapterError,
 };

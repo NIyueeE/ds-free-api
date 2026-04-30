@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [0.2.5] - 2026-04-29
+## [0.2.5] - 2026-04-30
 
 ### Added
 - **流式工具调用保活机制**：`CollectingXml` 和修复等待期间每 1s 发送空工具增量块
@@ -14,6 +14,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **修复模型 JSON 转义提示**：提醒修复模型对字符串值中的引号和换行符进行转义
 - **全链路日志追踪增强**：`<<<` / `>>>` 格式统一，覆盖 ds_core SSE → OpenAI chunk → Anthropic SSE 三层
 - **Anthropic Ping 事件支持**：`MessagesResponseChunk` 新增 `Ping` 变体
+- **Anthropic 流式响应测试**：新增 12 个测试覆盖 text/thinking/tool_calls/keepalive/优雅关闭等场景
+- **模块可见性收紧**：内部 submodule 的 `pub` 改为 `pub(crate)`，API 表面更精确
+
+### Changed
+- **工具调用主标签改为 `<|tool▁calls▁begin|>` / `<|tool▁calls▁end|>`**：
+  使用 ASCII `|` 替代全角 `｜`，避免后端特殊处理；模型识别和遵循度显著提升，幻觉大幅减少
+- **Prompt 格式对齐官方 chat_template**：
+  - `<｜end▁of▁sentence｜>` 在每个 `<｜User｜>` 前闭合上一轮 assistant + 工具结果
+  - `format_message` 去掉尾随 `\n`，角色标签间紧凑
+  - `<｜tool▁outputs▁begin｜>` 替换工具结果的 Markdown 噪声格式
+  - 连续 tool messages 合并为单一 `<｜tool▁outputs▁begin｜>` 块
+- **回退标签策略改为实验驱动**：默认回退列表清空，增量添加发现的幻觉变体（如 `<|tool_calls_begin|>`）
+- **规则文本使用 `{TOOL_CALL_START}` 常量**：tools.rs 的 3 处硬编码 `<tool_calls>` 改为常量引用
+- **`find_end_tag_with` 修复**：已知结束标签回退不再依赖 `start_tag` 推导，避免 `begin`→`end` 推导失败
+- **`docs/deepseek-prompt-injection.md`**：更新实验发现和当前策略
+- **README 中英文**：新增工具调用标签幻觉用户自维护说明
 
 ### Fixed
 - **文件上传错误处理分层**：历史文件（`EMPTY.txt`）上传失败时回退为完整 prompt 内联发送，
@@ -23,6 +39,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **Anthropic usage 始终为 0**：`stream_options.include_usage` 默认未设置导致 usage 丢失，
   修复为 Anthropic 请求强制开启；ConverterStream 将 usage 合并到 finish chunk；
   ToolCallStream Done 状态保留 usage
+
+### Removed
+- **冗余 converter 单元测试**：`converter_emits_role_and_content` 已被 response.rs 集成测试全覆盖
 
 ### Added
 - **Prompt 注入调研文档**：[`docs/deepseek-prompt-injection.md`](docs/deepseek-prompt-injection.md)，

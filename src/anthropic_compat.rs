@@ -8,6 +8,8 @@ pub(crate) mod request;
 pub(crate) mod response;
 pub(crate) mod types;
 
+pub use types::{MessagesRequest, MessagesResponse, MessagesResponseChunk};
+
 /// Anthropic 流式响应类型（结构体流）
 pub type ChunkStream =
     Pin<Box<dyn Stream<Item = Result<MessagesResponseChunk, AnthropicCompatError>> + Send>>;
@@ -23,7 +25,6 @@ use futures::Stream;
 use log::debug;
 
 use crate::openai_adapter::{ChatOutput, ChatResult, OpenAIAdapter, OpenAIAdapterError};
-use types::{MessagesRequest, MessagesResponse, MessagesResponseChunk};
 
 /// Anthropic 统一输出（对标 openai_adapter 的 ChatOutput）
 pub enum AnthropicOutput {

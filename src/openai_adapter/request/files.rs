@@ -13,7 +13,7 @@ use crate::openai_adapter::types::{ChatCompletionsRequest, ContentPart, MessageC
 use base64::Engine;
 
 /// 文件提取结果
-pub struct ExtractResult {
+pub(crate) struct ExtractResult {
     /// 需要上传到 DeepSeek 会话的内联文件
     pub files: Vec<FilePayload>,
     /// 是否包含需要模型通过搜索访问的 HTTP URL
@@ -21,7 +21,7 @@ pub struct ExtractResult {
 }
 
 /// 从 ChatCompletionsRequest 中提取文件信息和 HTTP URL 标记
-pub fn extract(req: &ChatCompletionsRequest) -> ExtractResult {
+pub(crate) fn extract(req: &ChatCompletionsRequest) -> ExtractResult {
     let mut files = Vec::new();
     let mut has_http_urls = false;
 

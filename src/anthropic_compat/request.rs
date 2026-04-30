@@ -17,7 +17,7 @@ use crate::openai_adapter::types::{
 // ============================================================================
 
 /// 将 Anthropic MessagesRequest 直接映射为 ChatCompletionsRequest 结构体
-pub fn into_chat_completions(req: MessagesRequest) -> ChatCompletionsRequest {
+pub(crate) fn into_chat_completions(req: MessagesRequest) -> ChatCompletionsRequest {
     // messages: system 前置 + messages 转换
     let mut messages = Vec::new();
     if let Some(ref system) = req.system {

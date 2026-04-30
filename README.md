@@ -88,6 +88,13 @@ area_code = ""
 password = "pass1"
 ```
 
+> **工具调用标签幻觉**：主标签为 `<|tool▁calls▁begin|>` / `<|tool▁calls▁end|>`。如果模型输出其他变体导致解析失败，可在 `config.toml` 的 `[deepseek]` 下追加回退标签：
+> ```toml
+> [deepseek]
+> tool_call.extra_starts = ["<ぺTool▁calls▁beginぺ>"]
+> tool_call.extra_ends = ["<ぺTool▁calls▁endぺ>"]
+> ```
+
 这里分享几个免费的测试账号，不要发敏感信息（虽然程序每次会收尾删除会话，但是可能会遗留）。
 
 ```text
