@@ -14,7 +14,6 @@
   <img src="https://img.shields.io/github/stars/NIyueeE/ds-free-api.svg">
   <img src="https://img.shields.io/github/forks/NIyueeE/ds-free-api.svg">
   <img src="https://img.shields.io/github/last-commit/NIyueeE/ds-free-api.svg">
-  <img src="https://img.shields.io/github/languages/code-size/NIyueeE/ds-free-api.svg">
 </p>
 
 [English](README.en.md)
