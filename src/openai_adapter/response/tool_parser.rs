@@ -138,9 +138,9 @@ pub(crate) fn find_end_tag_with<'a>(
         }
         // 模糊回退：close_tag 中可能含 ｜/▁ 变体
         let close_partial = close_tag.trim_end_matches('>');
-        if let Some((pos, _)) = fuzzy_match_tag(search, close_partial) {
+        if let Some((pos, matched)) = fuzzy_match_tag(search, close_partial) {
             let abs = from + pos;
-            return Some((abs, &s[abs..abs + close_partial.len()]));
+            return Some((abs, &s[abs..abs + matched.len()]));
         }
     }
 
@@ -152,9 +152,9 @@ pub(crate) fn find_end_tag_with<'a>(
         }
         // 模糊回退
         let end_partial = end.trim_end_matches('>');
-        if let Some((pos, _)) = fuzzy_match_tag(search, end_partial) {
+        if let Some((pos, matched)) = fuzzy_match_tag(search, end_partial) {
             let abs = from + pos;
-            return Some((abs, &s[abs..abs + end_partial.len()]));
+            return Some((abs, &s[abs..abs + matched.len()]));
         }
     }
     if let Some(st) = start_tag
@@ -965,6 +965,17 @@ mod tests {
     #[test]
     fn parse_tool_calls_single_object_and_repair_backslashes() {
         let xml = tool(r#"{"name": "read_file", "arguments": {"path": "C:\Users\name"}}"#);
+        let (calls, _) = parse_tool_calls(&xml).unwrap();
+        assert_eq!(calls.len(), 1);
+    }
+
+    #[test]
+    fn fuzzy_match_hallucinated_marker() {
+        // <|tool▁calls▁begin|> 正常标签，但结束标签用 <|tool_calls▁end｜>
+        // （ASCII _ + ▁ + 全角 ｜），验证模糊匹配能识别
+        let xml = format!(
+            r#"{TOOL_CALL_START}[{{"name": "get_weather", "arguments": {{"city": "北京"}}}}]<|tool_calls▁end｜>"#
+        );
         let (calls, _) = parse_tool_calls(&xml).unwrap();
         assert_eq!(calls.len(), 1);
     }
