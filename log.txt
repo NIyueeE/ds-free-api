@@ -1,0 +1,134 @@
+ds-free-api 项目完整分析报告
+一、项目概览
+ds-free-api 是一个用 Rust 编写的 API 代理服务器（v0.2.5，edition 2024），它将 DeepSeek 内部协议包装为标准的 OpenAI 和 Anthropic 兼容 API，实现"免费使用 DeepSeek 模型"的目标。
+
+核心技术栈：
+
+Rust 1.95.0（rust-toolchain.toml 锁定版本）
+axum 0.8.8 — HTTP 服务器框架
+reqwest 0.13.2 — HTTP 客户端（含 json/stream/multipart 特性）
+wasmtime 44.0.0 — 执行 DeepSeek 的 PoW WASM 求解器
+tiktoken-rs 0.11.0 — 客户端 prompt token 计数
+tokio 1.51.0 — 异步运行时（含 signal 特性用于优雅关闭）
+dashmap 6 — 无锁并发 HashMap（账号池）
+pin-project-lite 0.2.17 — 流式响应包装
+仓库结构：
+
+PlainText
+
+
+
+ds-free-api/├── src/                    # Rust 源码│   ├── main.rs             # 二进制入口（~10 行薄壳）│   ├── lib.rs              # 公共 API 导出│   ├── config.rs           # 配置加载│   ├── ds_core.rs          # DeepSeek 核心层门面│   ├── ds_core/            # 核心实现（账号、客户端、PoW、聊天编排）│   ├── openai_adapter.rs   # OpenAI 协议适配器门面│   ├── openai_adapter/     # 适配器实现（请求/响应管线）│   ├── anthropic_compat.rs # Anthropic 兼容层门面│   ├── anthropic_compat/   # 兼容层实现（协议翻译）│   ├── server.rs           # HTTP 服务器门面│   └── server/             # 服务器实现（路由、中间件、管理面板）├── examples/               # 调试 CLI + JSON 请求样本├── py-e2e-tests/           # Python 端到端测试├── web/                    # React 管理面板前端├── docs/                   # 文档└── config.example.toml     # 配置参考
+二、分层架构（自底向上）
+2.1 ds_core/ — DeepSeek 核心层
+这是最底层，直接与 DeepSeek API 交互。
+
+模块	文件	职责
+客户端	client.rs	原始 HTTP 调用，零业务逻辑。封装了登录、session CRUD、PoW 挑战、completion 流、文件上传/查询、WASM 下载。关键设计：Envelope<{code, msg, data: {biz_code, biz_msg, biz_data}}> 统一解析 DeepSeek 响应信封。
+账号池	accounts.rs	1 账号 = 1 session = 1 并发。AccountGuard RAII 模式：获取时标记 Busy，Drop 时自动释放。选号策略：选空闲时间最长的账号（最大化冷却间隔）。支持动态增删账号、自动恢复（每 60s 重登 Error 账号）、连续 3 次失败标记 Invalid。
+PoW 求解	pow.rs	基于 DeepSeek 的 WASM（DeepSeekHashV1）求解 PoW 挑战。关键创新：通过签名动态探测 wasm-bindgen 导出符号（__wbindgen_add_to_stack_pointer、allocator、wasm_solve），避免 WASM 更新后硬编码符号失效。
+聊天编排	completions.rs	v0_chat() 是核心入口：获取账号 → 分割历史 → 创建 session → 上传文件 → 计算 PoW → 发送 completion → 返回 GuardedStream。GuardedStream 将账号守卫与 SSE 流绑定，流结束时自动释放账号。
+2.2 openai_adapter/ — OpenAI 协议适配层
+这是中间层，将 OpenAI 兼容请求转换为 ds_core 内部格式，并将响应转回 OpenAI 格式。
+
+请求管线（单结构体贯穿）：
+
+PlainText
+
+
+
+ChatCompletionsRequest  → normalize::apply      # 参数标准化  → tools::extract        # 提取工具定义  → files::extract        # 提取文件（data   URL → FilePayload，HTTP URL → 搜索模式）  → prompt::build         # 构建 ChatML   prompt（含工具注入到 <think> 块）  → resolver::resolve     # 模型 ID 解析 +   能力开关（reasoning/web_search）  → tiktoken              # token 计数  → ds_core::ChatRequest  # 转为内部请求
+响应管线（流式转换链）：
+
+PlainText
+
+
+
+ds_core SSE bytes  → SseStream (sse_parser)          # 解  析 SSE 事件  → StateStream (state)             # 状态  机跟踪（delta/thinking/tool_call）  → ConverterStream (converter)     # 转换  为 OpenAI Chunk 格式  → ToolCallStream (tool_parser)    # 解  析 以下是 **ds-free-api** 项目的完整分析报  告：---## 一、项目概览**ds-free-api** 是一个用 Rust 编写的 API 代理服务器（v0.2.5，edition 2024），它将 DeepSeek 内部协议包装为标准的 OpenAI 和 Anthropic 兼容 API，实现"免费使用 DeepSeek 模型"的目标。| 属性 | 详情 ||------|------|| 语言 / 运行时 | Rust 1.95.0 (edition 2024) + Tokio 异步 || HTTP 框架 | axum 0.8.8 + tower-http || HTTP 客户端 | reqwest 0.13.2 (json/stream/multipart) || PoW 引擎 | wasmtime 44.0.0 (Cranelift) || Token 计数 | tiktoken-rs 0.11.0 (cl100k_base) || 流式响应 | pin-project-lite 0.2.17 || 并发数据结构 | dashmap 6 || 管理面板 | React + TypeScript + Vite (web/) |---## 二、分层架构（自底向上）### 2.1 `ds_core/` — DeepSeek 核心层最底层，直接与 DeepSeek API 交互。| 模块 | 职责 ||------|------|| [client.rs](file:///Users/Apple/Documents/Project/ds-free-api/src/ds_core/client.rs) | 原始 HTTP 调用，零业务逻辑。封装登录、session CRUD、PoW 挑战、completion 流、文件上传/查询。关键设计：`Envelope<{code, msg, data: {biz_code, biz_msg, biz_data}}>` 统一解析 DeepSeek 双重响应信封。 || [accounts.rs](file:///Users/Apple/Documents/Project/ds-free-api/src/ds_core/accounts.rs) | **1 账号 = 1 session = 1 并发**。`AccountGuard` RAII 模式：获取标记 Busy，Drop 自动释放回 Idle。选号策略：选空闲最久的账号最大化冷却间隔。支持动态增删、自动恢复 Error 账号（60s 周期）、连续 3 次失败标记 Invalid。 || [pow.rs](file:///Users/Apple/Documents/Project/ds-free-api/src/ds_core/pow.rs) | 基于 DeepSeek WASM 的 `DeepSeekHashV1` PoW 求解。**关键创新**：通过签名动态探测 wasm-bindgen 导出符号（`__wbindgen_add_to_stack_pointer`、allocator、`wasm_solve`），避免 WASM 更新后硬编码失效。结果 base64 编码后放入 `X-Ds-Pow-Response` 头。 || [completions.rs](file:///Users/Apple/Documents/Project/ds-free-api/src/ds_core/completions.rs) | `v0_chat()` 核心编排：获取账号 → 创建 session → 上传文件（带 PoW）→ 发送 completion → 返回 `GuardedStream`（流结束时自动释放账号 + 清理 session）。支持历史分割（多轮对话打包为文件上传）和文件处理。 |### 2.2 `openai_adapter/` — OpenAI 协议适配层将 OpenAI 兼容请求转为 `ds_core` 内部格式，响应转回 OpenAI 格式。**请求管线（单结构体贯穿，无中间类型）：**
+ChatCompletionsRequest → normalize::apply # 参数标准化（兼容旧版 functions→tools） → tools::extract # 提取工具定义 → files::extract # data URL → FilePayload | HTTP URL → 搜索模式 → prompt::build # ChatML prompt + 工具注入到
+块 → resolver::resolve # 模型 ID 解析 + 能力开关（reasoning/web_search） → tiktoken 计数 → ds_core::ChatRequest
+
+PlainText
+
+
+
+**响应管线（5 层 Stream 包装链）：**
+ds_core SSE bytes → SseStream (解析 SSE 事件，提取 data: 行) → StateStream (状态机：track delta/thinking/tool_call 片段) → ConverterStream (转换为 OpenAI ChatCompletionsResponseChunk) → ToolCallStream (解析 XML tool_calls → JSON，含 repair 回退) → StopStream (stop 序列截断) → SSE bytes (JSON 行)
+
+PlainText
+
+
+
+
+**工具调用修复机制**（`create_repair_fn`）：当模型输出格式不符合 `
+**工具调用修复机制**（`create_repair_fn`）：当模型输出格式不符合 `
+arxiv/search_papers
+Thought
+ds-free-api 项目完整分析报告
+一、项目概览
+ds-free-api 是一个用 Rust 编写的 API 代理服务器（v0.2.5，edition 2024），它将 DeepSeek 内部协议包装为标准的 OpenAI 和 Anthropic 兼容 API，实现多个账号池轮换、PoW 验证和流式响应的完整代理服务。
+
+核心技术栈：
+
+Rust 1.95.0（rust-toolchain.toml 锁定版本）
+axum 0.8.8 — HTTP 服务器框架
+reqwest 0.13.2 — HTTP 客户端（含 json/stream/multipart 特性）
+wasmtime 44.0.0 — 执行 DeepSeek 的 PoW WASM 求解器
+tiktoken-rs 0.11.0 — 客户端 prompt token 计数
+tokio 1.51.0 — 异步运行时（含 signal 特性用于优雅关闭）
+dashmap 6 — 无锁并发 HashMap（账号池）
+pin-project-lite 0.2.17 — 流式响应包装
+bcrypt + jsonwebtoken — 管理面板认证
+仓库结构：
+
+PlainText
+
+
+
+ds-free-api/├── src/                    # Rust 源码│   ├── main.rs             # 二进制入口（约 10 行薄壳）│   ├── lib.rs              # 公共 API 导出│   ├── config.rs           # 配置加载│   ├── ds_core.rs          # DeepSeek 核心层门面│   ├── ds_core/            # 核心实现（账号pool、客户端、PoW、completions编排）│   ├── openai_adapter.rs   # OpenAI 协议适配器门面│   ├── openai_adapter/     # 适配器实现（请求/响应管线）│   ├── anthropic_compat.rs # Anthropic 兼容层门面│   ├── anthropic_compat/   # 兼容层实现（协议翻译）│   ├── server.rs           # HTTP 服务器门面│   └── server/             # 服务器实现（路由、中间件、管理面板）├── examples/               # 调试 CLI + JSON 请求样本├── py-e2e-tests/           # Python 端到端测试├── web/                    # React 管理面板前端├── docs/                   # 文档└── config.example.toml     # 配置参考
+二、分层架构（自底向上）
+2.1 ds_core/ — DeepSeek 核心层
+直接与 DeepSeek API 交互的最低层。
+
+模块	文件	职责
+客户端	client.rs	原始 HTTP 调用，零业务逻辑。封装登录、session CRUD、PoW 挑战、completion 流、文件上传/查询、WASM 下载。关键设计：Envelope<{code, msg, data: {biz_code, biz_msg, biz_data}}> 统一解析 DeepSeek 的双重响应信封。
+账号池	accounts.rs	1 账号 = 1 session = 1 并发。AccountGuard RAII 模式：获取时标记 Busy，Drop 时自动释放回 Idle。选号策略：选空闲时间最长的账号（最大化冷却间隔）。支持动态增删账号、Error 账号自动恢复（60s 轮询）、连续 3 次重登失败标记 Invalid。
+PoW 求解	pow.rs	基于 DeepSeek WASM 的 DeepSeekHashV1 算法。关键创新：通过签名动态探测 wasm-bindgen 导出符号（__wbindgen_add_to_stack_pointer、allocator、wasm_solve），避免 WASM 更新后硬编码符号失效。
+聊天编排	completions.rs	v0_chat() 核心流程：获取账号 → 创建 session → 上传文件（带 PoW）→ 计算 PoW → 发送 completion → 返回 GuardedStream（流结束或 Drop 时自动清理 session 并释放账号）。支持历史分割——多轮对话的早期轮次打包为 EMPTY.txt 文件上传。
+错误链（自底向上）：
+
+PlainText
+
+
+
+ClientError (HTTP/Business/JSON)  → PoolError (Client | Pow | Validation)    → CoreError (Overloaded |     ProofOfWorkFailed | ProviderError |     Stream)      → OpenAIAdapterError (BadRequest |       Overloaded | ProviderError |       Internal)        → AnthropicCompatError         (BadRequest | Overloaded |         Internal)          → ServerError (Adapter |           Unauthorized | NotFound)
+2.2 openai_adapter/ — OpenAI 协议适配层
+将标准 OpenAI 请求转为 ds_core 内部格式，将响应转回 OpenAI 格式。
+
+请求管线（单结构体贯穿，无中间类型）：
+
+PlainText
+
+
+
+ 
+ChatCompletionsRequest  → normalize::apply      # 兼容旧   functions/function_call → tools/  tool_choice  → tools::extract        # 提取工具定义  → files::extract        # data URL →   FilePayload | HTTP URL → 搜索模式  → prompt::build         # ChatML prompt   + 工具定义注入 <think> 块  → resolver::resolve     # 模型 ID 解析 +   能力开关（reasoning/web_search）  → tiktoken 计数         # cl100k_base   BPE  → ds_core::ChatRequest  # 转为内部格式
+响应管线（5 层 Stream 包装链，全部 pin_project! 宏实现）：
+
+PlainText
+
+
+
+ds_core SSE bytes
+  → SseStream     (sse_parser: 解析 data: 行，提取 JSON)
+  → StateStream   (state: 状态机跟踪 delta/thinking/tool_call 片段)
+  → ConverterStream (converter: 累积内容转为 OpenAI Chunk)
+  → ToolCallStream (tool_parser: 解析 XML tool_calls → JSON，含 repair 回退)
+  → StopStream    (stop 序列截断)
+  → OpenAI SSE bytes
+ds_core SSE bytes  → SseStream     (sse_parser: 解析 data:   行，提取 JSON)  → StateStream   (state: 状态机跟踪 delta/  thinking/tool_call 片段)  → ConverterStream (converter: 累积内容转  为 OpenAI Chunk)  → ToolCallStream (tool_parser: 解析 XML   tool_calls → JSON，含 repair 回退)  → StopStream    (stop 序列截断)  → OpenAI SSE bytes
+手动终止输出
+
+
+
+
