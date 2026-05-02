@@ -1,0 +1,25 @@
+# ── 交叉编译专用 Dockerfile ──────────────────────────────────────────────
+# 在 Mac ARM 上快速构建 x86 Linux 镜像，跳过容器内编译
+#
+# 用法：
+#   1. cargo zigbuild --release --target x86_64-unknown-linux-gnu
+#   2. cd web && npm install && npm run build && cd ..
+#   3. docker build -f Dockerfile.cross -t ds-free-api:latest .
+#   4. docker save ds-free-api:latest | gzip > ds-free-api.tar.gz
+
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*
+WORKDIR /app
+
+COPY target/x86_64-unknown-linux-gnu/release/ds-free-api /app/ds-free-api
+COPY web/dist /app/web/dist
+COPY config.example.toml /app/config.example.toml
+
+VOLUME /app/data
+
+ENV RUST_LOG=info
+ENV DS_DATA_DIR=/app/data
+
+EXPOSE 5317
+
+ENTRYPOINT ["/app/ds-free-api"]

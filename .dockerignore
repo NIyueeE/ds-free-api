@@ -1,4 +1,5 @@
 target/
+!target/x86_64-unknown-linux-gnu/release/ds-free-api
 web/node_modules/
 .git/
 .claude/
