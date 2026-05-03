@@ -2,7 +2,9 @@
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    env_logger::Builder::from_env(env_logger::Env::new().default_filter_or("info")).init();
+    let data_dir = std::env::var("DS_DATA_DIR").unwrap_or_else(|_| ".".to_string());
+    let log_path = format!("{}/logs/runtime.log", data_dir);
+    ds_free_api::server::runtime_log::init(&log_path);
 
     let config = ds_free_api::Config::load_with_args(std::env::args())?;
     ds_free_api::server::run(config).await

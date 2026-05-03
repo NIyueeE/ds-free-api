@@ -70,6 +70,33 @@ fn merge_messages(messages: &[Message]) -> Vec<Message> {
     merged
 }
 
+/// 生成 response_format 对应的提示文本
+fn format_response_text(rf: &crate::openai_adapter::types::ResponseFormat) -> String {
+    match rf.ty.as_str() {
+        "json_object" => {
+            "请直接输出合法的 JSON 对象，不要包含任何 markdown 代码块标记或其他解释性文字。"
+                .into()
+        }
+        "json_schema" => {
+            let schema_text = rf
+                .json_schema
+                .as_ref()
+                .map(|s| serde_json::to_string(s).unwrap_or_default())
+                .unwrap_or_default();
+            if schema_text.is_empty() {
+                "以 JSON 的形式输出。".into()
+            } else {
+                format!(
+                    "以 JSON 的形式输出，输出的 JSON 需遵守以下的格式：\n\n~~~json\n{}\n~~~",
+                    schema_text
+                )
+            }
+        }
+        "text" => String::new(),
+        _ => format!("请以 {} 格式输出。", rf.ty),
+    }
+}
+
 /// 构建 DeepSeek 原生标签格式的 prompt 字符串
 /// 顺序: [system(含 reminder)] [历史 user/tool/assistant 轮次...] <｜Assistant｜><think>[reminder]
 pub(crate) fn build(req: &ChatCompletionsRequest, tool_ctx: &ToolContext) -> String {
@@ -117,34 +144,10 @@ pub(crate) fn build(req: &ChatCompletionsRequest, tool_ctx: &ToolContext) -> Str
         reminder_parts.push(format!("## 工具调用\n{}", tool_sections.join("\n\n")));
     }
 
-    // response_format 降级：将格式约束注入到 <think> 块中
-    if let Some(rf) = &req.response_format {
-        let text = match rf.ty.as_str() {
-            "json_object" => {
-                "请直接输出合法的 JSON 对象，不要包含任何 markdown 代码块标记或其他解释性文字。"
-                    .into()
-            }
-            "json_schema" => {
-                let schema_text = rf
-                    .json_schema
-                    .as_ref()
-                    .map(|s| serde_json::to_string(s).unwrap_or_default())
-                    .unwrap_or_default();
-                if schema_text.is_empty() {
-                    "以 JSON 的形式输出。".into()
-                } else {
-                    format!(
-                        "以 JSON 的形式输出，输出的 JSON 需遵守以下的格式：\n\n~~~json\n{}\n~~~",
-                        schema_text
-                    )
-                }
-            }
-            "text" => String::new(),
-            _ => format!("请以 {} 格式输出。", rf.ty),
-        };
-        if !text.is_empty() {
-            reminder_parts.push(format!("## 输出格式\n{}", text));
-        }
+    // response_format 降级：将格式约束注入到 <arg_key> 块中
+    let format_text = req.response_format.as_ref().map(|rf| format_response_text(rf)).unwrap_or_default();
+    if !format_text.is_empty() {
+        reminder_parts.push(format!("## 输出格式\n{}", format_text));
     }
 
     if !reminder_parts.is_empty() {
@@ -173,33 +176,9 @@ pub(crate) fn build(req: &ChatCompletionsRequest, tool_ctx: &ToolContext) -> Str
             think_parts.push(format!("## 工具调用\n{}", think_sections.join("\n\n")));
         }
         // response_format only in think
-        if let Some(rf) = &req.response_format {
-            let text = match rf.ty.as_str() {
-                "json_object" => {
-                    "请直接输出合法的 JSON 对象，不要包含任何 markdown 代码块标记或其他解释性文字。"
-                        .into()
-                }
-                "json_schema" => {
-                    let schema_text = rf
-                        .json_schema
-                        .as_ref()
-                        .map(|s| serde_json::to_string(s).unwrap_or_default())
-                        .unwrap_or_default();
-                    if schema_text.is_empty() {
-                        "以 JSON 的形式输出。".into()
-                    } else {
-                        format!(
-                            "以 JSON 的形式输出，输出的 JSON 需遵守以下的格式：\n\n~~~json\n{}\n~~~",
-                            schema_text
-                        )
-                    }
-                }
-                "text" => String::new(),
-                _ => format!("请以 {} 格式输出。", rf.ty),
-            };
-            if !text.is_empty() {
-                think_parts.push(format!("## 输出格式\n{}", text));
-            }
+        let think_format_text = req.response_format.as_ref().map(|rf| format_response_text(rf)).unwrap_or_default();
+        if !think_format_text.is_empty() {
+            think_parts.push(format!("## 输出格式\n{}", think_format_text));
         }
         if !think_parts.is_empty() {
             let think_reminder = format!(

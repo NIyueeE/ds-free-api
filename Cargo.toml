@@ -7,17 +7,24 @@ edition = "2024"
 anyhow = "1.0.102"
 axum = "0.8.8"
 base64 = "0.22.1"
+bcrypt = "0.17"
 bytes = "1"
+chrono = "0.4.44"
+dashmap = "6"
 env_logger = { version = "0.11.10", features = ["auto-color"] }
 futures = "0.3.32"
+jsonwebtoken = "9"
 log = "0.4.29"
+mime_guess = "2.0.5"
 pin-project-lite = "0.2.17"
 rand = "0.10.0"
 reqwest = { version = "0.13.2", features = ["json", "stream", "multipart", "query"] }
+rust-embed = "8.11.0"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
 thiserror = "2.0.18"
 tiktoken-rs = "0.11.0"
 tokio = { version = "1.51.0", features = ["macros", "rt-multi-thread", "signal"] }
 toml = "1.1.2"
+tower-http = { version = "0.6", features = ["fs", "cors"] }
 wasmtime = { version = "44.0.0", features = ["cranelift"] }

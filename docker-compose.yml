@@ -1,0 +1,17 @@
+services:
+  ds-free-api:
+    build: .
+    container_name: ds-free-api
+    restart: unless-stopped
+    ports:
+      - "5317:5317"
+    volumes:
+      - ./config.toml:/app/config.toml:ro
+      - ds-data:/app/data
+    environment:
+      - RUST_LOG=info
+      - DS_DATA_DIR=/app/data
+      - TZ=Asia/Shanghai
+
+volumes:
+  ds-data:

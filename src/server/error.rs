@@ -4,7 +4,7 @@
 
 use axum::{
     Json,
-    http::StatusCode,
+    http::{HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
 };
 use serde::Serialize;
@@ -122,7 +122,14 @@ fn openai_error_response(err: &ServerError) -> Response {
 
     log::debug!(target: "http::response", "{} error: {}", status, body.error.message);
 
-    (status, Json(body)).into_response()
+    let mut resp = (status, Json(body)).into_response();
+    if status == StatusCode::TOO_MANY_REQUESTS {
+        resp.headers_mut().insert(
+            header::RETRY_AFTER,
+            HeaderValue::from_static("30"),
+        );
+    }
+    resp
 }
 
 fn anthropic_error_response(err: &AnthropicCompatError) -> Response {
@@ -142,5 +149,12 @@ fn anthropic_error_response(err: &AnthropicCompatError) -> Response {
 
     log::debug!(target: "http::response", "{} Anthropic error: {}", status, body.message);
 
-    (status, Json(body)).into_response()
+    let mut resp = (status, Json(body)).into_response();
+    if status == StatusCode::TOO_MANY_REQUESTS {
+        resp.headers_mut().insert(
+            header::RETRY_AFTER,
+            HeaderValue::from_static("30"),
+        );
+    }
+    resp
 }

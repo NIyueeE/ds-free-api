@@ -8,6 +8,7 @@ mod completions;
 mod pow;
 
 pub use accounts::AccountStatus;
+pub use accounts::PoolError;
 pub use completions::{ChatRequest, ChatResponse, FilePayload};
 
 use crate::config::Config;
@@ -59,7 +60,7 @@ impl DeepSeekCore {
         let wasm_bytes = client.get_wasm().await?;
         let solver = PowSolver::new(&wasm_bytes)?;
 
-        let mut pool = AccountPool::new();
+        let pool = AccountPool::new();
         pool.init(config.accounts.clone(), &client, &solver)
             .await
             .map_err(|e| match e {
@@ -71,9 +72,10 @@ impl DeepSeekCore {
                 accounts::PoolError::Validation(msg) => {
                     CoreError::ProviderError(format!("配置错误: {}", msg))
                 }
+                other => CoreError::ProviderError(other.to_string()),
             })?;
 
-        let completions = crate::ds_core::completions::Completions::new(client, solver, pool);
+        let completions = crate::ds_core::completions::Completions::new(client, solver, pool).await;
 
         Ok(Self { completions })
     }
@@ -91,6 +93,32 @@ impl DeepSeekCore {
 
     pub fn account_statuses(&self) -> Vec<AccountStatus> {
         self.completions.account_statuses()
+    }
+
+    /// 动态添加账号
+    pub async fn add_account(
+        &self,
+        creds: &crate::config::Account,
+    ) -> Result<String, PoolError> {
+        self.completions.add_account(creds).await
+    }
+
+    /// 动态移除账号
+    pub async fn remove_account(
+        &self,
+        email_or_mobile: &str,
+    ) -> Result<String, PoolError> {
+        self.completions.remove_account(email_or_mobile).await
+    }
+
+    /// 标记账号为 Error 状态
+    pub fn mark_error(&self, email_or_mobile: &str) {
+        self.completions.mark_error(email_or_mobile)
+    }
+
+    /// 手动重新登录指定账号
+    pub async fn re_login_single(&self, email_or_mobile: &str) -> Result<(), String> {
+        self.completions.re_login_single(email_or_mobile).await
     }
 
     /// 优雅关闭：清理所有账号的 session

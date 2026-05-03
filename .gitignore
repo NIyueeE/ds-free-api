@@ -11,10 +11,43 @@ py-e2e-tests/uv.lock
 config.toml
 !py-e2e-tests/config.toml
 
+# 运行时敏感文件
+admin.json
+api_keys.json
+stats.json
+logs/
+data/
+
 # tmp文件
 **/tmp.*
 **/tmp_*
 **/tmp
+log.txt
+
+# Web (frontend)
+web/node_modules
+web/dist
+web/dist-ssr
+*.local
+
+# npm/yarn/pnpm logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# Editor / OS
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
 
 # 呃
 .claude

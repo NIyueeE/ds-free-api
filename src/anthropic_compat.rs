@@ -70,6 +70,7 @@ impl AnthropicCompat {
         Ok(ChatResult {
             data,
             account_id: result.account_id,
+            prompt_tokens: result.prompt_tokens,
         })
     }
 

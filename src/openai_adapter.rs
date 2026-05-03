@@ -37,6 +37,7 @@ pub enum ChatOutput {
 pub struct ChatResult<T> {
     pub data: T,
     pub account_id: String,
+    pub prompt_tokens: u32,
 }
 
 /// OpenAI 适配器
@@ -44,9 +45,12 @@ pub struct OpenAIAdapter {
     ds_core: Arc<DeepSeekCore>,
     model_types: Vec<String>,
     model_registry: std::collections::HashMap<String, String>,
+    model_aliases: std::collections::HashMap<String, String>,
     max_input_tokens: Vec<u32>,
     max_output_tokens: Vec<u32>,
     tag_config: Arc<response::TagConfig>,
+    /// 缓存的 tiktoken BPE 编码器（避免每次请求重建）
+    bpe: Option<Arc<tiktoken_rs::CoreBPE>>,
 }
 
 impl OpenAIAdapter {
@@ -54,13 +58,18 @@ impl OpenAIAdapter {
     pub async fn new(config: &crate::config::Config) -> Result<Self, OpenAIAdapterError> {
         let ds_core = Arc::new(DeepSeekCore::new(config).await?);
         let model_registry = config.deepseek.model_registry();
+        // 预初始化 tiktoken BPE（避免每次请求重建词表）
+        let bpe = tiktoken_rs::cl100k_base().ok().map(Arc::new);
+
         Ok(Self {
             ds_core,
             model_types: config.deepseek.model_types.clone(),
             model_registry,
+            model_aliases: config.deepseek.model_aliases.clone(),
             max_input_tokens: config.deepseek.max_input_tokens.clone(),
             max_output_tokens: config.deepseek.max_output_tokens.clone(),
             tag_config: Arc::new(response::TagConfig::from_config(&config.deepseek.tool_call)),
+            bpe,
         })
     }
 
@@ -118,7 +127,8 @@ impl OpenAIAdapter {
         )
         .map_err(OpenAIAdapterError::BadRequest)?;
 
-        let prompt_tokens = tiktoken_rs::cl100k_base()
+        let prompt_tokens = self.bpe
+            .as_ref()
             .map(|bpe| bpe.encode_with_special_tokens(&prompt).len() as u32)
             .unwrap_or(0);
 
@@ -167,6 +177,7 @@ impl OpenAIAdapter {
             Ok(ChatResult {
                 data: ChatOutput::Stream(s),
                 account_id,
+                prompt_tokens,
             })
         } else {
             let repair_fn = self.create_repair_fn(request_id, tool_defs);
@@ -186,18 +197,19 @@ impl OpenAIAdapter {
             Ok(ChatResult {
                 data: ChatOutput::Json(json),
                 account_id,
+                prompt_tokens,
             })
         }
     }
 
-    /// 内部辅助：对 `Overloaded` 进行指数退避重试
+    /// 内部辅助：对 `Overloaded` 进行退避重试（v0_chat 内部已做换号重试，此处为号池级兜底）
     pub(crate) async fn try_chat(
         &self,
         req: crate::ds_core::ChatRequest,
         request_id: &str,
     ) -> Result<crate::ds_core::ChatResponse, CoreError> {
-        const MAX_RETRIES: usize = 6;
-        const BASE_DELAY_MS: u64 = 1000;
+        const MAX_RETRIES: usize = 2;
+        const BASE_DELAY_MS: u64 = 2000;
 
         for attempt in 0..MAX_RETRIES {
             match self.ds_core.v0_chat(req.clone(), request_id).await {
@@ -225,6 +237,7 @@ impl OpenAIAdapter {
             &self.model_types,
             &self.max_input_tokens,
             &self.max_output_tokens,
+            &self.model_aliases,
         )
     }
 
@@ -234,6 +247,7 @@ impl OpenAIAdapter {
             &self.model_types,
             &self.max_input_tokens,
             &self.max_output_tokens,
+            &self.model_aliases,
             model_id,
         )
     }
@@ -274,12 +288,39 @@ impl OpenAIAdapter {
         Ok(ChatResult {
             data,
             account_id: chat_resp.account_id,
+            prompt_tokens: 0,
         })
     }
 
     /// 获取 ds_core 账号池状态
     pub fn account_statuses(&self) -> Vec<crate::ds_core::AccountStatus> {
         self.ds_core.account_statuses()
+    }
+
+    /// 动态添加账号
+    pub async fn add_account(
+        &self,
+        creds: &crate::config::Account,
+    ) -> Result<String, crate::ds_core::PoolError> {
+        self.ds_core.add_account(creds).await
+    }
+
+    /// 动态移除账号
+    pub async fn remove_account(
+        &self,
+        email_or_mobile: &str,
+    ) -> Result<String, crate::ds_core::PoolError> {
+        self.ds_core.remove_account(email_or_mobile).await
+    }
+
+    /// 标记账号为 Error 状态
+    pub fn mark_error(&self, email_or_mobile: &str) {
+        self.ds_core.mark_error(email_or_mobile)
+    }
+
+    /// 手动重新登录指定账号
+    pub async fn re_login_single(&self, email_or_mobile: &str) -> Result<(), String> {
+        self.ds_core.re_login_single(email_or_mobile).await
     }
 
     /// 优雅关闭

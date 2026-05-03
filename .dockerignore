@@ -1,0 +1,11 @@
+target/
+!target/x86_64-unknown-linux-gnu/release/ds-free-api
+web/node_modules/
+.git/
+.claude/
+config.toml
+admin.json
+api_keys.json
+*.tmp
+deepseek_accounts.txt
+py-e2e-tests/

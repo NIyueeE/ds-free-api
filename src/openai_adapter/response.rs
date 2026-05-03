@@ -66,12 +66,61 @@ fn random_padding(len: usize) -> String {
 pub(crate) fn sse_serialize(
     chunk: &ChatCompletionsResponseChunk,
 ) -> Result<Bytes, OpenAIAdapterError> {
-    let json_text = serde_json::to_string(chunk).map_err(OpenAIAdapterError::from)?;
-    Ok(Bytes::from(format!("data: {}\n\n", json_text)))
+    let mut buf = Vec::with_capacity(256);
+    buf.extend_from_slice(b"data: ");
+    serde_json::to_writer(&mut buf, chunk).map_err(OpenAIAdapterError::from)?;
+    buf.extend_from_slice(b"\n\n");
+    Ok(Bytes::from(buf))
 }
 
 fn find_stop_pos(content: &str, stop: &[String]) -> Option<usize> {
     stop.iter().filter_map(|s| content.find(s)).min()
+}
+
+/// 检测模型重复生成循环
+///
+/// 策略：取 buffer 末尾 `check_len` 个字符作为窗口，检查它是否在 buffer 前面已经出现过。
+/// 如果连续 3 次检测到相同窗口内容重复出现，判定为重复循环。
+fn detect_repetition(
+    buffer: &str,
+    window: &mut String,
+    check_len: usize,
+    repeat_count: &mut usize,
+) -> bool {
+    if buffer.len() < check_len * 2 {
+        return false;
+    }
+
+    // 取最近的 check_len 个字符作为检测窗口
+    let tail = &buffer[buffer.len() - check_len..];
+
+    // 检查窗口是否在 buffer 前面出现过
+    let search_region = &buffer[..buffer.len() - check_len];
+    if search_region.contains(tail) {
+        // 窗口内容相同，检查是否与上次检测窗口一致
+        if *window == tail {
+            *repeat_count += 1;
+            if *repeat_count >= 3 {
+                log::warn!(
+                    target: "adapter",
+                    "重复检测触发: 窗口重复 {} 次, 内容长度={}",
+                    repeat_count, check_len
+                );
+                return true;
+            }
+        } else {
+            // 新的重复窗口，重置计数
+            window.clear();
+            window.push_str(tail);
+            *repeat_count = 1;
+        }
+    } else {
+        // 无重复，重置
+        window.clear();
+        *repeat_count = 0;
+    }
+
+    false
 }
 
 /// RepairStream 内部使用的流类型
@@ -300,6 +349,10 @@ pin_project! {
         sent_len: usize,
         buffer: String,
         include_obfuscation: bool,
+        // 重复检测：追踪最近内容用于检测循环生成
+        repeat_window: String,
+        repeat_check_len: usize,
+        repeat_count: usize,
     }
 }
 
@@ -348,6 +401,25 @@ where
                             *this.stopped = true;
                             this.buffer.clear();
                             *this.sent_len = pos;
+                        } else if detect_repetition(
+                            &this.buffer,
+                            &mut this.repeat_window,
+                            *this.repeat_check_len,
+                            &mut this.repeat_count,
+                        ) {
+                            // 重复检测触发：截断到重复开始的位置
+                            let truncate_pos = this.buffer.len().saturating_sub(*this.repeat_check_len);
+                            trace!(target: "adapter", ">>> repeat: truncate at {}", truncate_pos);
+                            let truncated = &this.buffer[*this.sent_len..truncate_pos];
+                            if truncated.is_empty() {
+                                choice.delta.content = None;
+                            } else {
+                                choice.delta.content = Some(truncated.to_string());
+                            }
+                            choice.finish_reason = Some(FINISH_STOP);
+                            *this.stopped = true;
+                            this.buffer.clear();
+                            *this.sent_len = truncate_pos;
                         } else {
                             *this.sent_len = this.buffer.len();
                         }
@@ -422,19 +494,43 @@ where
         sent_len: 0,
         buffer: String::new(),
         include_obfuscation: cfg.include_obfuscation,
+        repeat_window: String::with_capacity(512),
+        repeat_check_len: 200,
+        repeat_count: 0,
     };
     Box::pin(stop_detect)
 }
 
-/// 将 ChunkStream 序列化为 SSE 字节流
+/// 将 ChunkStream 序列化为 SSE 字节流，带 completion_tokens 追踪
+///
+/// `on_finish` 在流结束时被调用，参数为累积的 completion_tokens
+pub(crate) fn sse_stream_with_callback(
+    inner: ChunkStream,
+    on_finish: Box<dyn FnOnce(u64) + Send>,
+) -> StreamResponse {
+    Box::pin(SseSerializer {
+        inner,
+        completion_tokens: 0u64,
+        on_finish: Some(on_finish),
+    })
+}
+
+/// 将 ChunkStream 序列化为 SSE 字节流（无回调）
+#[allow(dead_code)]
 pub(crate) fn sse_stream(inner: ChunkStream) -> StreamResponse {
-    Box::pin(SseSerializer { inner })
+    Box::pin(SseSerializer {
+        inner,
+        completion_tokens: 0u64,
+        on_finish: None,
+    })
 }
 
 pin_project! {
     struct SseSerializer<S> {
         #[pin]
         inner: S,
+        completion_tokens: u64,
+        on_finish: Option<Box<dyn FnOnce(u64) + Send>>,
     }
 }
 
@@ -448,11 +544,21 @@ where
         let mut this = self.project();
         match this.inner.as_mut().poll_next(cx) {
             Poll::Ready(Some(Ok(chunk))) => {
+                // 追踪 completion_tokens
+                if let Some(u) = &chunk.usage {
+                    *this.completion_tokens = u.completion_tokens as u64;
+                }
                 trace!(target: "adapter", ">>> {}", serde_json::to_string(&chunk).unwrap_or_default());
                 Poll::Ready(Some(sse_serialize(&chunk)))
             }
             Poll::Ready(Some(Err(e))) => Poll::Ready(Some(Err(e))),
-            Poll::Ready(None) => Poll::Ready(None),
+            Poll::Ready(None) => {
+                // 流结束，触发回调
+                if let Some(on_finish) = this.on_finish.take() {
+                    on_finish(*this.completion_tokens);
+                }
+                Poll::Ready(None)
+            }
             Poll::Pending => Poll::Pending,
         }
     }

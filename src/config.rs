@@ -71,6 +71,10 @@ pub struct DeepSeekConfig {
     /// 工具调用标签配置（自定义回退标签）
     #[serde(default)]
     pub tool_call: ToolCallTagConfig,
+    /// 模型别名：key 为别名 model_id，value 为映射到的 model_type
+    /// 默认：deepseek-v4-flash → default, deepseek-v4-pro → expert
+    #[serde(default = "default_model_aliases")]
+    pub model_aliases: std::collections::HashMap<String, String>,
 }
 
 /// 工具调用标签配置
@@ -125,12 +129,20 @@ impl Default for DeepSeekConfig {
             max_input_tokens: default_max_input_tokens(),
             max_output_tokens: default_max_output_tokens(),
             tool_call: ToolCallTagConfig::default(),
+            model_aliases: default_model_aliases(),
         }
     }
 }
 
 fn default_model_types() -> Vec<String> {
     vec!["default".to_string(), "expert".to_string()]
+}
+
+fn default_model_aliases() -> std::collections::HashMap<String, String> {
+    let mut m = std::collections::HashMap::new();
+    m.insert("deepseek-v4-flash".to_string(), "default".to_string());
+    m.insert("deepseek-v4-pro".to_string(), "expert".to_string());
+    m
 }
 
 fn default_max_input_tokens() -> Vec<u32> {
@@ -150,6 +162,10 @@ impl DeepSeekConfig {
         for ty in &self.model_types {
             map.insert(format!("deepseek-{}", ty).to_lowercase(), ty.clone());
         }
+        // 合并别名（别名 → model_type）
+        for (alias, ty) in &self.model_aliases {
+            map.insert(alias.to_lowercase(), ty.clone());
+        }
         map
     }
 }
@@ -161,20 +177,14 @@ pub struct ServerConfig {
     pub host: String,
     /// 监听端口
     pub port: u16,
-    /// API 访问令牌列表，留空则不鉴权
-    #[serde(default)]
-    pub api_tokens: Vec<ApiToken>,
-    // TODO: admin_password — 等控制面板端点实现时再加
+    /// CORS 允许的 Origin 列表，默认 ["http://localhost:5317"]
+    /// 设为 ["*"] 则允许所有（不推荐生产使用）
+    #[serde(default = "default_cors_origins")]
+    pub cors_origins: Vec<String>,
 }
 
-/// API 访问令牌
-#[derive(Debug, Clone, Deserialize)]
-pub struct ApiToken {
-    /// 令牌值（如 sk-xxx）
-    pub token: String,
-    /// 描述说明
-    #[serde(default)]
-    pub description: String,
+fn default_cors_origins() -> Vec<String> {
+    vec!["http://localhost:5317".to_string()]
 }
 
 /// 默认 API 基础地址

@@ -2,10 +2,12 @@
 host = "127.0.0.1"
 port = 5317
 
-# API 访问令牌，留空则不鉴权
-# [[server.api_tokens]]
-# token = "sk-your-token"
-# description = "开发测试"
+# CORS 允许的 Origin 列表（默认 ["http://localhost:5317"]）
+# 设为 ["*"] 允许所有 Origin（不推荐生产使用）
+# cors_origins = ["http://localhost:5317"]
+
+# API Key 和管理密码通过 Web 管理面板配置（http://127.0.0.1:5317/admin）
+# 首次访问时将引导设置管理密码，之后可在面板中创建/管理 API Key
 
 # 邮箱登录示例
 [[accounts]]
@@ -56,6 +58,12 @@ password = "pass3"
 # model_types = ["default", "expert"]
 # max_input_tokens = [1048576, 1048576]
 # max_output_tokens = [384000, 384000]
+
+# 模型别名（可选，默认已包含以下映射）
+# key 为 OpenAI model_id，value 为映射到的 model_type
+# [deepseek.model_aliases]
+# deepseek-v4-flash = "default"
+# deepseek-v4-pro = "expert"
 
 # 代理配置（可选，绕过 CloudFront WAF 地区限制）
 # 使用非美国地区的代理出口节点可避免 WAF Challenge
