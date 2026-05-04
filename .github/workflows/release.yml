@@ -22,9 +22,9 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
-          node-version: "22"
+          node-version-file: web/.node-version
           cache: "npm"
           cache-dependency-path: web/package-lock.json
       - name: Install dependencies
@@ -67,7 +67,6 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.95.0"
           targets: ${{ matrix.target }}
       - name: Cache dependencies
         uses: Swatinem/rust-cache@v2
@@ -121,7 +120,6 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.95.0"
           targets: ${{ matrix.target }}
       - name: Cache dependencies
         uses: Swatinem/rust-cache@v2
@@ -175,7 +173,6 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.95.0"
           targets: ${{ matrix.target }}
       - name: Cache dependencies
         uses: Swatinem/rust-cache@v2
@@ -226,7 +223,6 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.95.0"
           targets: ${{ matrix.target }}
       - name: Cache dependencies
         uses: Swatinem/rust-cache@v2
