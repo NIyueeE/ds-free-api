@@ -168,6 +168,12 @@
     "zh": "中文",
     "en": "English"
   },
+  "theme": {
+    "system": "System",
+    "light": "Light",
+    "dark": "Dark",
+    "toggle": "Click to switch theme"
+  },
   "common": {
     "loading": "Loading...",
     "save": "Save",

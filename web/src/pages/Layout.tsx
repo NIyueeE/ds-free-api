@@ -3,6 +3,7 @@ import { useAuth } from '@/lib/use-auth';
 import { Button } from '@/components/ui/button';
 import { Separator } from '@/components/ui/separator';
 import { LanguageSwitcher } from '@/components/LanguageSwitcher';
+import { ThemeSwitcher } from '@/components/ThemeSwitcher';
 import {
   LayoutDashboard,
   Boxes,
@@ -59,6 +60,7 @@ export function Layout() {
         <Separator />
         <div className="p-2 space-y-2">
           <LanguageSwitcher />
+          <ThemeSwitcher />
           <Button
             variant="ghost"
             className="w-full justify-start gap-3 text-muted-foreground"

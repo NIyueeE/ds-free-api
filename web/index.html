@@ -4,6 +4,15 @@
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/admin/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <script>
+      (function() {
+        var key = 'theme-preference';
+        var value = localStorage.getItem(key);
+        var theme = value === 'light' || value === 'dark' || value === 'system' ? value : 'system';
+        var dark = theme === 'dark' || (theme === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches);
+        document.documentElement.classList.toggle('dark', dark);
+      })();
+    </script>
     <title>DS Free API - 管理面板</title>
   </head>
   <body>
