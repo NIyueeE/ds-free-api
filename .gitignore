@@ -48,3 +48,4 @@ lerna-debug.log*
 # 呃
 .claude
 .deepseek
+.rustup-codex

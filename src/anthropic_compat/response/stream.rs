@@ -286,7 +286,31 @@ where
                     }
                 }
                 Poll::Ready(Some(Err(e))) => {
-                    return Poll::Ready(Some(Err(AnthropicCompatError::from(e))));
+                    if !this.state.started {
+                        return Poll::Ready(Some(Err(AnthropicCompatError::from(e))));
+                    }
+                    if !this.state.finished {
+                        debug!(
+                            target: "anthropic_compat::response::stream",
+                            "上游流错误后补齐 Anthropic 收尾事件: {}",
+                            e
+                        );
+                        this.state.finished = true;
+                        let mut events: Vec<MessagesResponseChunk> =
+                            this.state.transition_to(BlockKind::None);
+                        events.push(MessagesResponseChunk::MessageDelta {
+                            stop_reason: None,
+                            stop_sequence: None,
+                            output_tokens: Some(this.state.completion_tokens.unwrap_or(0)),
+                        });
+                        events.push(MessagesResponseChunk::MessageStop);
+                        this.pending_events.extend(events);
+                    }
+                    if !this.pending_events.is_empty() {
+                        let event = this.pending_events.remove(0);
+                        return Poll::Ready(Some(Ok(event)));
+                    }
+                    return Poll::Ready(None);
                 }
                 Poll::Ready(None) => {
                     debug!(target: "anthropic_compat::response::stream", "流结束, started={}, finished={}", this.state.started, this.state.finished);
@@ -487,6 +511,18 @@ mod tests {
         let mut events = Vec::new();
         while let Some(event) = anthropic.next().await {
             events.push(event.unwrap());
+        }
+        events
+    }
+
+    async fn collect_results(
+        chunks: Vec<Result<ChatCompletionsResponseChunk, OpenAIAdapterError>>,
+    ) -> Vec<Result<MessagesResponseChunk, crate::anthropic_compat::AnthropicCompatError>> {
+        let stream = futures::stream::iter(chunks);
+        let mut anthropic = super::from_chat_completion_stream(stream);
+        let mut events = Vec::new();
+        while let Some(event) = anthropic.next().await {
+            events.push(event);
         }
         events
     }
@@ -772,6 +808,21 @@ mod tests {
         if let MessagesResponseChunk::MessageDelta { stop_reason, .. } = &events[delta_idx] {
             assert_eq!(stop_reason, &None);
         }
+    }
+
+    #[tokio::test]
+    async fn upstream_error_after_start_sends_message_stop() {
+        let events = collect_results(vec![
+            Ok(role_chunk("deepseek-default", "chatcmpl-err")),
+            Ok(content_chunk("Hi")),
+            Err(OpenAIAdapterError::Internal("upstream interrupted".into())),
+        ])
+        .await;
+
+        assert!(events.iter().all(Result::is_ok));
+        let events: Vec<_> = events.into_iter().map(Result::unwrap).collect();
+        assert_eq!(events.last().unwrap().event_name(), "message_stop");
+        assert_eq!(events[events.len() - 2].event_name(), "message_delta");
     }
 
     #[tokio::test]
