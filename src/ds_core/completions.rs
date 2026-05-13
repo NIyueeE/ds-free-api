@@ -278,7 +278,10 @@ impl Completions {
         // 历史文件上传失败时退回到完整 prompt 内联发送
         let mut history_upload_failed = false;
 
-        if !history_content.is_empty() {
+        // DeepSeek が expert モードのファイルアップロードを制限したため、
+        // expert では履歴ファイルをアップロードせず常にインラインプロンプトを使用する
+        let skip_history_upload = req.model_type == "expert";
+        if !history_content.is_empty() && !skip_history_upload {
             match self
                 .upload_and_poll(
                     &token,
@@ -298,6 +301,12 @@ impl Completions {
                     history_upload_failed = true;
                 }
             }
+        } else if !history_content.is_empty() {
+            log::info!(
+                target: "ds_core::accounts",
+                "req={} expert模式跳过文件上传，使用内联prompt (history_size={})", request_id, history_content.len()
+            );
+            history_upload_failed = true;
         }
 
         for file in &req.files {
