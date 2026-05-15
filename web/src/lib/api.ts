@@ -111,6 +111,7 @@ export interface AccountStatus {
   state: string;
   last_released_ms: number;
   error_count: number;
+  mute_until: number;
 }
 
 export interface AdminStatusResponse {
@@ -120,6 +121,7 @@ export interface AdminStatusResponse {
   busy: number;
   error: number;
   invalid: number;
+  muted: number;
 }
 
 export interface StatsSnapshot {
