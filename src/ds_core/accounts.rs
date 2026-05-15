@@ -23,6 +23,7 @@ pub enum AccountState {
     Busy = 1,
     Error = 2,
     Invalid = 3,
+    Muted = 4,
 }
 
 impl AccountState {
@@ -31,16 +32,19 @@ impl AccountState {
             0 => Self::Idle,
             1 => Self::Busy,
             2 => Self::Error,
+            3 => Self::Invalid,
+            4 => Self::Muted,
             _ => Self::Invalid,
         }
     }
 
-    fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::Idle => "idle",
             Self::Busy => "busy",
             Self::Error => "error",
             Self::Invalid => "invalid",
+            Self::Muted => "muted",
         }
     }
 }
@@ -55,6 +59,8 @@ pub struct AccountStatus {
     pub last_released_ms: i64,
     /// 连续登录失败次数
     pub error_count: u8,
+    /// 禁言截止时间戳（秒），仅当 state == "muted" 时有意义
+    pub mute_until: i64,
 }
 
 pub struct Account {
@@ -68,6 +74,8 @@ pub struct Account {
     error_count: AtomicU8,
     /// 原始凭据（用于重新登录）
     creds: AccountConfig,
+    /// 禁言截止时间戳（秒），0 表示未禁言
+    mute_until: AtomicI64,
 }
 
 /// 连续登录失败上限，达到后标记为 Invalid
@@ -95,7 +103,41 @@ impl Account {
     }
 
     pub fn is_available(&self) -> bool {
-        self.state() == AccountState::Idle
+        loop {
+            let state = self.state();
+            if state != AccountState::Muted {
+                return state == AccountState::Idle;
+            }
+
+            let now = SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs() as i64;
+            let until = self.mute_until.load(Ordering::Relaxed);
+            if until <= 0 || now < until {
+                return false;
+            }
+
+            // CAS: 只有当前仍是 Muted 时才恢复为 Idle
+            match self.state.compare_exchange(
+                AccountState::Muted as u8,
+                AccountState::Idle as u8,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => {
+                    self.mute_until.store(0, Ordering::Relaxed);
+                    self.error_count.store(0, Ordering::Relaxed);
+                    info!(target: "ds_core::accounts", "账号 {} 禁言到期，自动恢复为 Idle", self.display_id());
+                    return true;
+                }
+                Err(_) => continue,
+            }
+        }
+    }
+
+    pub fn mute_until(&self) -> i64 {
+        self.mute_until.load(Ordering::Relaxed)
     }
 
     /// 创建一个 Invalid 状态的账号（初始化失败时使用，仍加入池以便前台展示）
@@ -108,6 +150,7 @@ impl Account {
             last_released: AtomicI64::new(0),
             error_count: AtomicU8::new(MAX_ERROR_COUNT),
             creds,
+            mute_until: AtomicI64::new(0),
         }
     }
 }
@@ -290,7 +333,7 @@ impl AccountPool {
             return Err(PoolError::AccountBusy(email_or_mobile.to_string()));
         }
 
-        // 也允许移除 Error/Invalid 状态的账号
+        // 也允许移除 Error/Invalid/Muted 状态的账号
         drop(account);
         let (_, removed) = self
             .accounts
@@ -369,6 +412,7 @@ impl AccountPool {
                     state: a.state().as_str().to_string(),
                     last_released_ms: a.last_released.load(Ordering::Relaxed),
                     error_count: a.error_count.load(Ordering::Relaxed),
+                    mute_until: a.mute_until(),
                 }
             })
             .collect()
@@ -387,7 +431,7 @@ impl AccountPool {
     pub fn mark_error(&self, email_or_mobile: &str) {
         if let Some(entry) = self.accounts.get(email_or_mobile) {
             let account = entry.value();
-            // 只从 Busy 转到 Error（避免覆盖 Invalid）
+            // 只从 Busy 转到 Error（避免覆盖 Invalid/Muted）
             account
                 .state
                 .compare_exchange(
@@ -398,6 +442,43 @@ impl AccountPool {
                 )
                 .ok();
             warn!(target: "ds_core::accounts", "账号 {} 标记为 Error", account.display_id());
+        }
+    }
+
+    /// 标记账号为 Muted 状态（临时封禁）
+    pub fn mark_muted(&self, email_or_mobile: &str, mute_until: i64) {
+        if let Some(entry) = self.accounts.get(email_or_mobile) {
+            let account = entry.value();
+            // 从 Busy 或 Idle 转到 Muted（Idle 表示请求已结束但响应延迟到达）
+            let _ = account
+                .state
+                .compare_exchange(
+                    AccountState::Busy as u8,
+                    AccountState::Muted as u8,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                );
+            let _ = account
+                .state
+                .compare_exchange(
+                    AccountState::Idle as u8,
+                    AccountState::Muted as u8,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                );
+            account.mute_until.store(mute_until, Ordering::Relaxed);
+            warn!(
+                target: "ds_core::accounts",
+                "账号 {} 标记为 Muted，解封时间: {}",
+                account.display_id(),
+                if mute_until == 0 {
+                    "永久".to_string()
+                } else {
+                    chrono::DateTime::from_timestamp(mute_until, 0)
+                        .map(|dt| dt.to_string())
+                        .unwrap_or_else(|| mute_until.to_string())
+                }
+            );
         }
     }
 
@@ -416,7 +497,7 @@ impl AccountPool {
             .ok_or_else(|| format!("账号 {} 不存在", email_or_mobile))?;
         let account = account.value();
 
-        // 只允许 Error/Invalid 状态的账号重登
+        // 只允许 Error/Invalid 状态的账号重登（Muted 需要等待解封或手动处理）
         let state = account.state();
         if state != AccountState::Error && state != AccountState::Invalid {
             return Err(format!(
@@ -564,6 +645,7 @@ async fn try_init_account(
         last_released: AtomicI64::new(0),
         error_count: AtomicU8::new(0),
         creds: creds.clone(),
+        mute_until: AtomicI64::new(0),
     })
 }
 

@@ -51,7 +51,8 @@
       "idle": "Idle",
       "busy": "Busy",
       "error": "Error",
-      "invalid": "Invalid"
+      "invalid": "Invalid",
+      "muted": "Muted"
     }
   },
   "config": {

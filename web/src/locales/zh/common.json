@@ -51,7 +51,8 @@
       "idle": "空闲",
       "busy": "忙碌",
       "error": "异常",
-      "invalid": "失效"
+      "invalid": "失效",
+      "muted": "禁言"
     }
   },
   "config": {

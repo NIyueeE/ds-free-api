@@ -227,23 +227,53 @@ export function DashboardPage() {
               <div className="text-3xl font-bold text-red-600">{status?.invalid ?? '-'}</div>
               <div className="text-sm text-muted-foreground">{t('dashboard.accountPool.invalid')}</div>
             </div>
+            <div className="text-center">
+              <div className="text-3xl font-bold text-purple-600">{status?.muted ?? '-'}</div>
+              <div className="text-sm text-muted-foreground">{t('dashboard.accountPool.muted')}</div>
+            </div>
           </div>
           <div className="mt-4 flex flex-wrap gap-2">
             {status?.accounts.map((a) => {
               const isBusy = a.state === 'busy';
               const isError = a.state === 'error';
               const isInvalid = a.state === 'invalid';
-              const variant = isBusy ? 'default' : isError ? 'secondary' : isInvalid ? 'destructive' : 'secondary';
-              const className = isBusy
-                ? 'bg-amber-500/15 text-amber-700 border-amber-200'
-                : isError
-                ? 'bg-yellow-500/15 text-yellow-700 border-yellow-200'
-                : isInvalid
-                ? 'bg-red-500/15 text-red-700 border-red-200'
-                : 'bg-green-500/15 text-green-700 border-green-200';
+              const isMuted = a.state === 'muted';
+              let variant = 'secondary';
+              let className = 'bg-green-500/15 text-green-700 border-green-200';
+              let displayText = a.email || a.mobile;
+
+              if (isBusy) {
+                variant = 'default';
+                className = 'bg-amber-500/15 text-amber-700 border-amber-200';
+              } else if (isError) {
+                variant = 'secondary';
+                className = 'bg-yellow-500/15 text-yellow-700 border-yellow-200';
+              } else if (isInvalid) {
+                variant = 'destructive';
+                className = 'bg-red-500/15 text-red-700 border-red-200';
+              } else if (isMuted) {
+                variant = 'secondary';
+                className = 'bg-purple-500/15 text-purple-700 border-purple-200';
+                // 显示解封倒计时
+                if (a.mute_until && a.mute_until > 0) {
+                  const now = Date.now() / 1000;
+                  const remainingSecs = Math.max(0, a.mute_until - now);
+                  if (remainingSecs > 0) {
+                    const hours = Math.floor(remainingSecs / 3600);
+                    const minutes = Math.floor((remainingSecs % 3600) / 60);
+                    const seconds = Math.floor(remainingSecs % 60);
+                    let remainingStr = '';
+                    if (hours > 0) remainingStr = `${hours}h ${minutes}m`;
+                    else if (minutes > 0) remainingStr = `${minutes}m ${seconds}s`;
+                    else remainingStr = `${seconds}s`;
+                    displayText = `${a.email || a.mobile} (${remainingStr})`;
+                  }
+                }
+              }
+
               return (
                 <Badge key={a.email || a.mobile} variant={variant} className={className}>
-                  {a.email || a.mobile}
+                  {displayText}
                 </Badge>
               );
             })}
