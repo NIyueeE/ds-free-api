@@ -123,13 +123,13 @@ where
                         });
                     }
 
-                    (text.is_some() || tool_call.is_some()).then(|| ChunkDelta { text, tool_call })
+                    (text.is_some() || tool_call.is_some()).then_some(ChunkDelta { text, tool_call })
                 });
 
                 let finish_reason = chunk.choices.first().and_then(|c| c.finish_reason);
                 let is_finish = finish_reason.is_some();
 
-                let status = is_finish.then(|| "completed".to_string());
+                let status = is_finish.then_some("completed".to_string());
 
                 let response_chunk = ResponseChunk {
                     id: this.response_id.clone(),
