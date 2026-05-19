@@ -24,6 +24,7 @@ use crate::anthropic_compat::{
 use crate::config::Config;
 use crate::openai_adapter::{
     ChatCompletionsRequest, ChatOutput, OpenAIAdapter, OpenAIAdapterError,
+    ResponseOutput, ResponseRequest,
 };
 
 use super::auth::LoginLimiter;
@@ -327,6 +328,98 @@ pub(crate) async fn get_model(
                 .into_response())
         },
     )
+}
+
+/// POST /v1/responses
+pub(crate) async fn responses(
+    State(state): State<AppState>,
+    ApiKey(api_key): ApiKey,
+    body: Bytes,
+) -> Result<Response, ServerError> {
+    let request_id = next_request_id();
+    let timer = super::stats::RequestTimer::new(&state.stats);
+    let timer_start = std::time::Instant::now();
+    let req: ResponseRequest = serde_json::from_slice(&body)
+        .map_err(|e| OpenAIAdapterError::BadRequest(format!("bad request: {}", e)))?;
+    log::debug!(target: "http::request", "req={} POST /v1/responses stream={}", request_id, req.stream);
+    let model = req.model.clone();
+
+    let result = state.adapter.responses(req, &request_id).await;
+    match &result {
+        Ok(_) => timer.mark_success(),
+        Err(_) => timer.mark_failure(),
+    };
+    let result = result?;
+    match result.data {
+        ResponseOutput::Stream(stream) => {
+            let prompt_tokens = u64::from(result.prompt_tokens);
+            use futures::StreamExt;
+            let completion_tokens = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+            let ct_ref = completion_tokens.clone();
+            let elapsed = timer_start.elapsed();
+            let latency_ms = elapsed.as_secs() * 1000 + u64::from(elapsed.subsec_millis());
+            let sse = stream
+                .inspect(move |chunk| {
+                    if let Ok(c) = chunk
+                        && let Some(u) = &c.usage
+                    {
+                        ct_ref.store(
+                            u64::from(u.completion_tokens),
+                            std::sync::atomic::Ordering::Relaxed,
+                        );
+                    }
+                })
+                .map(|chunk| match chunk {
+                    Ok(c) => crate::openai_adapter::response::responses::response_chunk_sse_serialize(&c),
+                    Err(e) => Err(e),
+                });
+            let guarded = TokenGuardStream {
+                inner: sse,
+                _guard: TokenGuard {
+                    stats: state.stats.clone(),
+                    prompt_tokens,
+                    completion_tokens,
+                    model: model.clone(),
+                    api_key: api_key.clone(),
+                    request_id: request_id.clone(),
+                    latency_ms,
+                    success: true,
+                },
+            };
+            log::debug!(target: "http::response", "req={} 200 SSE stream started", request_id);
+            Ok(SseBody::new(guarded)
+                .with_header(X_DS_ACCOUNT, &mask_account_id(&result.account_id))
+                .into_response())
+        }
+        ResponseOutput::Json(json) => {
+            let pt = u64::from(result.prompt_tokens);
+            let ct = json
+                .usage
+                .as_ref()
+                .map(|u| u64::from(u.completion_tokens))
+                .unwrap_or(0);
+            let elapsed = timer_start.elapsed();
+            let latency_ms = elapsed.as_secs() * 1000 + u64::from(elapsed.subsec_millis());
+            state.record_request(RequestRecord {
+                request_id: &request_id,
+                model: &model,
+                api_key: &api_key,
+                prompt_tokens: pt,
+                completion_tokens: ct,
+                latency_ms,
+                success: true,
+            });
+            let bytes = serde_json::to_vec(&json).unwrap();
+            log::debug!(target: "http::response", "req={} 200 JSON response {} bytes", request_id, bytes.len());
+            Ok(Response::builder()
+                .status(StatusCode::OK)
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(X_DS_ACCOUNT, &mask_account_id(&result.account_id))
+                .body(Body::from(bytes))
+                .unwrap()
+                .into_response())
+        }
+    }
 }
 
 // ============================================================================

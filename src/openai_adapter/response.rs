@@ -5,6 +5,7 @@
 //! - obfuscation 在最终 SSE 序列化阶段动态注入
 
 mod converter;
+pub(crate) mod responses;
 mod sse_parser;
 mod state;
 mod tool_parser;

@@ -24,7 +24,7 @@ use serde::{Deserialize, Serialize};
 // ============================================================================
 
 /// POST /v1/chat/completions 请求体
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Default)]
 pub struct ChatCompletionsRequest {
     pub model: String,
     pub messages: Vec<Message>,
@@ -147,7 +147,7 @@ pub struct ApproximateLocation {
 }
 
 /// 对话消息
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Clone, Default)]
 pub struct Message {
     pub role: String,
     #[serde(default)]
@@ -175,7 +175,7 @@ pub enum MessageContent {
 }
 
 /// 多模态内容块
-#[derive(Debug, Deserialize, Clone, PartialEq, Eq)]
+#[derive(Debug, Deserialize, Clone, PartialEq, Eq, Default)]
 pub struct ContentPart {
     #[serde(rename = "type")]
     pub ty: String,
@@ -364,7 +364,7 @@ pub(crate) fn default_true() -> bool {
 }
 
 /// stream_options 参数
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct StreamOptions {
     #[serde(default)]
     pub include_usage: bool,
@@ -603,4 +603,192 @@ pub struct CompletionTokensDetails {
     pub accepted_prediction_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rejected_prediction_tokens: Option<u32>,
+}
+
+// ============================================================================
+// Responses API 类型定义
+// ============================================================================
+
+/// POST /v1/responses 请求体
+#[derive(Debug, Deserialize, Clone)]
+pub struct ResponseRequest {
+    pub model: String,
+    #[serde(default)]
+    pub input: ResponseInput,
+    #[serde(default)]
+    pub stream: bool,
+    #[serde(default)]
+    pub tools: Option<Vec<ResponseTool>>,
+    #[serde(default)]
+    pub tool_choice: Option<ToolChoice>,
+    #[serde(default)]
+    pub max_output_tokens: Option<u32>,
+    #[serde(default)]
+    pub temperature: Option<f32>,
+    #[serde(default)]
+    pub top_p: Option<f32>,
+    #[serde(default)]
+    pub stop: Option<StopSequence>,
+    #[serde(default)]
+    pub instructions: Option<String>,
+    #[serde(default)]
+    pub text: Option<TextFormat>,
+    #[serde(default)]
+    pub reasoning: Option<ReasoningConfig>,
+    #[serde(default)]
+    pub stream_options: Option<StreamOptions>,
+    #[serde(default)]
+    pub metadata: Option<serde_json::Value>,
+    #[serde(default)]
+    pub store: Option<bool>,
+    #[serde(flatten)]
+    pub _extra: serde_json::Value,
+}
+
+/// Responses API 输入类型
+#[derive(Debug, Deserialize, Clone)]
+#[serde(untagged)]
+pub enum ResponseInput {
+    Text(String),
+    Turns(Vec<ResponseTurn>),
+}
+
+impl Default for ResponseInput {
+    fn default() -> Self {
+        Self::Text(String::new())
+    }
+}
+
+/// Responses API 对话轮次
+#[derive(Debug, Deserialize, Clone)]
+pub struct ResponseTurn {
+    pub role: String,
+    pub content: Vec<ContentItem>,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub tool_result: Option<ToolResult>,
+}
+
+/// Responses API 内容项
+#[derive(Debug, Deserialize, Clone)]
+#[serde(tag = "type")]
+pub enum ContentItem {
+    #[serde(rename = "input_text")]
+    InputText { text: String },
+    #[serde(rename = "output_text")]
+    OutputText { text: String },
+    #[serde(rename = "input_image")]
+    InputImage { image_url: String },
+}
+
+/// 工具调用结果
+#[derive(Debug, Deserialize, Clone)]
+pub struct ToolResult {
+    #[serde(default)]
+    pub content: Option<String>,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+/// Responses API 工具定义
+#[derive(Debug, Deserialize, Clone)]
+pub struct ResponseTool {
+    #[serde(rename = "type")]
+    pub ty: String,
+    #[serde(default)]
+    pub function: Option<FunctionDefinition>,
+}
+
+/// 文本格式化配置
+#[derive(Debug, Deserialize, Clone)]
+pub struct TextFormat {
+    #[serde(default)]
+    pub format: Option<OutputFormat>,
+}
+
+/// 输出格式
+#[derive(Debug, Deserialize, Clone)]
+#[serde(tag = "type")]
+pub enum OutputFormat {
+    #[serde(rename = "json_schema")]
+    JsonSchema {
+        name: String,
+        #[serde(default)]
+        strict: bool,
+        schema: serde_json::Value,
+    },
+}
+
+/// Reasoning 配置
+#[derive(Debug, Deserialize, Clone)]
+pub struct ReasoningConfig {
+    #[serde(default)]
+    pub effort: Option<String>,
+}
+
+/// Responses API 非流式响应
+#[derive(Debug, Serialize)]
+pub struct Response {
+    pub id: String,
+    pub object: &'static str,
+    pub created_at: f64,
+    pub model: String,
+    pub status: &'static str,
+    pub output: Vec<OutputItem>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usage: Option<Usage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub incomplete_details: Option<serde_json::Value>,
+}
+
+/// Responses API 输出项
+#[derive(Debug, Serialize)]
+#[serde(tag = "type")]
+pub enum OutputItem {
+    #[serde(rename = "text")]
+    Text { text: String },
+    #[serde(rename = "tool_call")]
+    ToolCall {
+        id: String,
+        function: FunctionCall,
+    },
+}
+
+/// Responses API 流式响应
+#[derive(Debug, Serialize)]
+pub struct ResponseChunk {
+    pub id: String,
+    pub object: &'static str,
+    pub created_at: f64,
+    pub model: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delta: Option<ChunkDelta>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output: Option<Vec<OutputItem>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usage: Option<Usage>,
+}
+
+/// Responses API 流式增量
+#[derive(Debug, Serialize)]
+pub struct ChunkDelta {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_call: Option<ToolCallDelta>,
+}
+
+/// 工具调用增量
+#[derive(Debug, Serialize)]
+pub struct ToolCallDelta {
+    pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub function: Option<FunctionCall>,
 }

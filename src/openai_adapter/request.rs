@@ -8,6 +8,7 @@ pub(crate) mod files;
 pub(crate) mod normalize;
 pub(crate) mod prompt;
 pub(crate) mod resolver;
+pub(crate) mod responses;
 pub(crate) mod tools;
 
 #[cfg(test)]

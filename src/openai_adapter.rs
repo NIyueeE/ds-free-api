@@ -19,7 +19,10 @@ pub(crate) mod request;
 pub(crate) mod response;
 pub(crate) mod types;
 
-pub use types::{ChatCompletionsRequest, ChatCompletionsResponse, ChatCompletionsResponseChunk};
+pub use types::{
+    ChatCompletionsRequest, ChatCompletionsResponse, ChatCompletionsResponseChunk,
+    Response, ResponseChunk, ResponseRequest,
+};
 
 /// 流式响应类型（SSE 字节流）
 pub type StreamResponse = Pin<Box<dyn Stream<Item = Result<Bytes, OpenAIAdapterError>> + Send>>;
@@ -28,10 +31,20 @@ pub type StreamResponse = Pin<Box<dyn Stream<Item = Result<Bytes, OpenAIAdapterE
 pub type ChunkStream =
     Pin<Box<dyn Stream<Item = Result<ChatCompletionsResponseChunk, OpenAIAdapterError>> + Send>>;
 
+/// Responses API 流式结构体流
+pub type ResponseChunkStream =
+    Pin<Box<dyn Stream<Item = Result<ResponseChunk, OpenAIAdapterError>> + Send>>;
+
 /// Chat Completions 统一输出
 pub enum ChatOutput {
     Stream(ChunkStream),
     Json(ChatCompletionsResponse),
+}
+
+/// Responses API 统一输出
+pub enum ResponseOutput {
+    Stream(ResponseChunkStream),
+    Json(Response),
 }
 
 /// adapter 层通用结果包装：携带请求结果和账号标识
@@ -255,6 +268,36 @@ impl OpenAIAdapter {
         let max_output = self.max_output_tokens.read().await;
         let aliases = self.model_aliases.read().await;
         models::get(&model_types, &max_input, &max_output, &aliases, model_id)
+    }
+
+    /// POST /v1/responses（统一入口）
+    ///
+    /// OpenAI Responses API 兼容接口，支持流式返回和工具调用
+    pub async fn responses(
+        &self,
+        req: ResponseRequest,
+        request_id: &str,
+    ) -> Result<ChatResult<ResponseOutput>, OpenAIAdapterError> {
+        log::debug!(target: "adapter", "req={} Responses API 开始处理: model={}, stream={}", request_id, req.model, req.stream);
+
+        let chat_req = request::responses::into_chat_completions(req.clone());
+        let result = self.chat_completions(chat_req, request_id).await?;
+
+        let data = match result.data {
+            ChatOutput::Stream(stream) => {
+                ResponseOutput::Stream(response::responses::from_chat_completion_stream(stream))
+            }
+            ChatOutput::Json(json) => {
+                let response = response::responses::from_chat_completions(&json);
+                ResponseOutput::Json(response)
+            }
+        };
+
+        Ok(ChatResult {
+            data,
+            account_id: result.account_id,
+            prompt_tokens: result.prompt_tokens,
+        })
     }
 
     /// 原始 DeepSeek SSE 流（不经 OpenAI 协议转换）

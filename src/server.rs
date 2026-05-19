@@ -95,6 +95,7 @@ fn build_router(state: AppState, cors_origins: Vec<String>) -> Router {
     let api_routes = Router::new()
         // OpenAI
         .route("/v1/chat/completions", post(handlers::chat_completions))
+        .route("/v1/responses", post(handlers::responses))
         .route("/v1/models", get(handlers::list_models))
         .route("/v1/models/{id}", get(handlers::get_model))
         // Anthropic
