@@ -1,4 +1,7 @@
-use super::super::types::*;
+use super::super::types::{
+    ChatCompletionsRequest, ContentItem, ContentPart, ImageUrlContent, Message, MessageContent,
+    ResponseInput, ResponseRequest, ResponseTool, Tool,
+};
 
 pub fn into_chat_completions(req: ResponseRequest) -> ChatCompletionsRequest {
     let messages = convert_input_to_messages(&req.input, req.instructions.as_deref());
@@ -50,13 +53,12 @@ fn convert_input_to_messages(input: &ResponseInput, instructions: Option<&str>) 
                     ..Default::default()
                 };
 
-                if turn.role == "tool" {
-                    if let Some(result) = &turn.tool_result {
-                        if let Some(content) = &result.content {
-                            message.content = Some(MessageContent::Text(content.clone()));
-                        } else if let Some(error) = &result.error {
-                            message.content = Some(MessageContent::Text(format!("Error: {}", error)));
-                        }
+                if turn.role == "tool"
+                    && let Some(result) = &turn.tool_result {
+                    if let Some(content) = &result.content {
+                        message.content = Some(MessageContent::Text(content.clone()));
+                    } else if let Some(error) = &result.error {
+                        message.content = Some(MessageContent::Text(format!("Error: {}", error)));
                     }
                 }
 
@@ -71,8 +73,9 @@ fn convert_input_to_messages(input: &ResponseInput, instructions: Option<&str>) 
 fn convert_content_items(items: &[ContentItem]) -> MessageContent {
     if items.len() == 1 {
         match &items[0] {
-            ContentItem::InputText { text } => MessageContent::Text(text.clone()),
-            ContentItem::OutputText { text } => MessageContent::Text(text.clone()),
+            ContentItem::InputText { text } | ContentItem::OutputText { text } => {
+                MessageContent::Text(text.clone())
+            }
             ContentItem::InputImage { image_url } => MessageContent::Parts(vec![ContentPart {
                 ty: "image_url".to_string(),
                 image_url: Some(ImageUrlContent {
@@ -86,12 +89,7 @@ fn convert_content_items(items: &[ContentItem]) -> MessageContent {
         let parts: Vec<ContentPart> = items
             .iter()
             .map(|item| match item {
-                ContentItem::InputText { text } => ContentPart {
-                    ty: "text".to_string(),
-                    text: Some(text.clone()),
-                    ..Default::default()
-                },
-                ContentItem::OutputText { text } => ContentPart {
+                ContentItem::InputText { text } | ContentItem::OutputText { text } => ContentPart {
                     ty: "text".to_string(),
                     text: Some(text.clone()),
                     ..Default::default()

@@ -44,7 +44,7 @@ pub enum ChatOutput {
 /// Responses API 统一输出
 pub enum ResponseOutput {
     Stream(ResponseChunkStream),
-    Json(Response),
+    Json(Box<Response>),
 }
 
 /// adapter 层通用结果包装：携带请求结果和账号标识
@@ -289,7 +289,7 @@ impl OpenAIAdapter {
             }
             ChatOutput::Json(json) => {
                 let response = response::responses::from_chat_completions(&json);
-                ResponseOutput::Json(response)
+                ResponseOutput::Json(Box::new(response))
             }
         };
 

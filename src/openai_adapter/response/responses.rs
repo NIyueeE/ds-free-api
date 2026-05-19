@@ -5,7 +5,10 @@ use futures::Stream;
 use pin_project_lite::pin_project;
 
 use crate::OpenAIAdapterError;
-use super::super::types::*;
+use super::super::types::{
+    ChatCompletionsResponse, ChatCompletionsResponseChunk, ChunkDelta, OutputItem, Response,
+    ResponseChunk, ToolCallDelta,
+};
 
 static RESPONSE_ID_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
@@ -26,16 +29,14 @@ pub fn from_chat_completions(chat: &ChatCompletionsResponse) -> Response {
     let mut has_tool_calls = false;
 
     if let Some(choice) = chat.choices.first() {
-        if let Some(content) = &choice.message.content {
-            if !content.is_empty() {
-                output.push(OutputItem::Text { text: content.clone() });
-            }
+        if let Some(content) = &choice.message.content
+            && !content.is_empty() {
+            output.push(OutputItem::Text { text: content.clone() });
         }
 
-        if let Some(reasoning) = &choice.message.reasoning_content {
-            if !reasoning.is_empty() {
-                output.push(OutputItem::Text { text: reasoning.clone() });
-            }
+        if let Some(reasoning) = &choice.message.reasoning_content
+            && !reasoning.is_empty() {
+            output.push(OutputItem::Text { text: reasoning.clone() });
         }
 
         if let Some(tool_calls) = &choice.message.tool_calls {
@@ -114,30 +115,21 @@ where
                         text = Some(content.clone());
                     }
 
-                    if let Some(tcs) = &choice.delta.tool_calls {
-                        if let Some(tc) = tcs.first() {
-                            tool_call = Some(ToolCallDelta {
-                                id: tc.id.clone(),
-                                function: tc.function.clone(),
-                            });
-                        }
+                    if let Some(tcs) = &choice.delta.tool_calls
+                        && let Some(tc) = tcs.first() {
+                        tool_call = Some(ToolCallDelta {
+                            id: tc.id.clone(),
+                            function: tc.function.clone(),
+                        });
                     }
 
-                    if text.is_some() || tool_call.is_some() {
-                        Some(ChunkDelta { text, tool_call })
-                    } else {
-                        None
-                    }
+                    (text.is_some() || tool_call.is_some()).then(|| ChunkDelta { text, tool_call })
                 });
 
                 let finish_reason = chunk.choices.first().and_then(|c| c.finish_reason);
                 let is_finish = finish_reason.is_some();
 
-                let status = if is_finish {
-                    Some("completed".to_string())
-                } else {
-                    None
-                };
+                let status = is_finish.then(|| "completed".to_string());
 
                 let response_chunk = ResponseChunk {
                     id: this.response_id.clone(),
