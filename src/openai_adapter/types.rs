@@ -747,7 +747,7 @@ pub struct Response {
 }
 
 /// Responses API 输出项
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone)]
 #[serde(tag = "type")]
 pub enum OutputItem {
     #[serde(rename = "output_text")]
@@ -759,7 +759,148 @@ pub enum OutputItem {
     },
 }
 
-/// Responses API 流式响应
+/// Responses API 流式响应事件
+#[derive(Debug, Serialize)]
+#[serde(tag = "type")]
+pub enum ResponseEvent {
+    #[serde(rename = "response.created")]
+    Created {
+        response: Response,
+        sequence_number: u32,
+    },
+    #[serde(rename = "response.in_progress")]
+    InProgress {
+        response: Response,
+        sequence_number: u32,
+    },
+    #[serde(rename = "response.output_item.added")]
+    OutputItemAdded {
+        item: OutputItemMessage,
+        output_index: u32,
+        sequence_number: u32,
+    },
+    #[serde(rename = "response.content_part.added")]
+    ContentPartAdded {
+        content_index: u32,
+        item_id: String,
+        output_index: u32,
+        part: OutputTextPart,
+        sequence_number: u32,
+    },
+    #[serde(rename = "response.output_text.delta")]
+    OutputTextDelta {
+        content_index: u32,
+        delta: String,
+        item_id: String,
+        output_index: u32,
+        sequence_number: u32,
+    },
+    #[serde(rename = "response.output_text.done")]
+    OutputTextDone {
+        content_index: u32,
+        item_id: String,
+        output_index: u32,
+        sequence_number: u32,
+        text: String,
+    },
+    #[serde(rename = "response.content_part.done")]
+    ContentPartDone {
+        content_index: u32,
+        item_id: String,
+        output_index: u32,
+        part: OutputTextPart,
+        sequence_number: u32,
+    },
+    #[serde(rename = "response.output_item.done")]
+    OutputItemDone {
+        item: OutputItemMessage,
+        output_index: u32,
+        sequence_number: u32,
+    },
+    #[serde(rename = "response.completed")]
+    Completed {
+        response: Response,
+        sequence_number: u32,
+    },
+    #[serde(rename = "error")]
+    Error {
+        error: ResponseError,
+        status: u16,
+    },
+}
+
+/// 响应错误
+#[derive(Debug, Serialize)]
+pub struct ResponseError {
+    #[serde(rename = "type")]
+    pub error_type: String,
+    pub code: String,
+    pub message: String,
+}
+
+/// 输出项消息
+#[derive(Debug, Serialize)]
+pub struct OutputItemMessage {
+    pub id: String,
+    #[serde(rename = "type")]
+    pub message_type: &'static str,
+    pub status: &'static str,
+    pub content: Vec<OutputTextPart>,
+    pub phase: &'static str,
+    pub role: &'static str,
+}
+
+/// 输出文本部分
+#[derive(Debug, Serialize, Clone)]
+pub struct OutputTextPart {
+    #[serde(rename = "type")]
+    pub part_type: &'static str,
+    pub annotations: Vec<serde_json::Value>,
+    pub logprobs: Vec<serde_json::Value>,
+    pub text: String,
+}
+
+impl Clone for ResponseError {
+    fn clone(&self) -> Self {
+        ResponseError {
+            error_type: self.error_type.clone(),
+            code: self.code.clone(),
+            message: self.message.clone(),
+        }
+    }
+}
+
+impl Clone for OutputItemMessage {
+    fn clone(&self) -> Self {
+        OutputItemMessage {
+            id: self.id.clone(),
+            message_type: self.message_type,
+            status: self.status,
+            content: self.content.clone(),
+            phase: self.phase,
+            role: self.role,
+        }
+    }
+}
+
+impl Clone for Response {
+    fn clone(&self) -> Self {
+        Response {
+            id: self.id.clone(),
+            object: self.object,
+            created_at: self.created_at,
+            model: self.model.clone(),
+            status: self.status,
+            output: self.output.clone(),
+            usage: self.usage.clone(),
+            metadata: self.metadata.clone(),
+            error: self.error.clone(),
+            incomplete_details: self.incomplete_details.clone(),
+        }
+    }
+}
+
+/// Responses API 流式响应（旧格式保留用于兼容性）
 #[derive(Debug, Serialize)]
 pub struct ResponseChunk {
     pub id: String,
@@ -776,7 +917,7 @@ pub struct ResponseChunk {
     pub usage: Option<Usage>,
 }
 
-/// Responses API 流式增量
+/// Responses API 流式增量（旧格式保留用于兼容性）
 #[derive(Debug, Serialize)]
 pub struct ChunkDelta {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -785,7 +926,7 @@ pub struct ChunkDelta {
     pub tool_call: Option<ToolCallDelta>,
 }
 
-/// 工具调用增量
+/// 工具调用增量（旧格式保留用于兼容性）
 #[derive(Debug, Serialize)]
 pub struct ToolCallDelta {
     pub id: String,

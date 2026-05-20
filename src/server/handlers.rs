@@ -354,23 +354,11 @@ pub(crate) async fn responses(
         ResponseOutput::Stream(stream) => {
             let prompt_tokens = u64::from(result.prompt_tokens);
             use futures::StreamExt;
-            let completion_tokens = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
-            let ct_ref = completion_tokens.clone();
             let elapsed = timer_start.elapsed();
             let latency_ms = elapsed.as_secs() * 1000 + u64::from(elapsed.subsec_millis());
             let sse = stream
-                .inspect(move |chunk| {
-                    if let Ok(c) = chunk
-                        && let Some(u) = &c.usage
-                    {
-                        ct_ref.store(
-                            u64::from(u.completion_tokens),
-                            std::sync::atomic::Ordering::Relaxed,
-                        );
-                    }
-                })
                 .map(|chunk| match chunk {
-                    Ok(c) => crate::openai_adapter::response::responses::response_chunk_sse_serialize(&c),
+                    Ok(c) => crate::openai_adapter::response::responses::response_event_sse_serialize(&c),
                     Err(e) => Err(e),
                 });
             let guarded = TokenGuardStream {
@@ -378,7 +366,7 @@ pub(crate) async fn responses(
                 _guard: TokenGuard {
                     stats: state.stats.clone(),
                     prompt_tokens,
-                    completion_tokens,
+                    completion_tokens: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
                     model: model.clone(),
                     api_key: api_key.clone(),
                     request_id: request_id.clone(),

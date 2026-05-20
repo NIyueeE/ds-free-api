@@ -21,7 +21,7 @@ pub(crate) mod types;
 
 pub use types::{
     ChatCompletionsRequest, ChatCompletionsResponse, ChatCompletionsResponseChunk,
-    Response, ResponseChunk, ResponseRequest,
+    Response, ResponseChunk, ResponseRequest, ResponseEvent,
 };
 
 /// 流式响应类型（SSE 字节流）
@@ -31,9 +31,13 @@ pub type StreamResponse = Pin<Box<dyn Stream<Item = Result<Bytes, OpenAIAdapterE
 pub type ChunkStream =
     Pin<Box<dyn Stream<Item = Result<ChatCompletionsResponseChunk, OpenAIAdapterError>> + Send>>;
 
-/// Responses API 流式结构体流
+/// Responses API 流式结构体流（旧格式保留）
 pub type ResponseChunkStream =
     Pin<Box<dyn Stream<Item = Result<ResponseChunk, OpenAIAdapterError>> + Send>>;
+
+/// Responses API 新格式流式事件流
+pub type ResponseEventStream =
+    Pin<Box<dyn Stream<Item = Result<ResponseEvent, OpenAIAdapterError>> + Send>>;
 
 /// Chat Completions 统一输出
 pub enum ChatOutput {
@@ -43,7 +47,7 @@ pub enum ChatOutput {
 
 /// Responses API 统一输出
 pub enum ResponseOutput {
-    Stream(ResponseChunkStream),
+    Stream(ResponseEventStream),
     Json(Box<Response>),
 }
 
