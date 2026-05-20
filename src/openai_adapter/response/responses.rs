@@ -309,6 +309,7 @@ where
                         }
                         
                         // 处理文本增量
+                        let mut text_delta_event = None;
                         if let Some(choice) = chunk.choices.first() {
                             if let Some(content) = &choice.delta.content
                                 && !content.is_empty()
@@ -318,21 +319,13 @@ where
                                 let seq = *this.sequence_number;
                                 *this.sequence_number += 1;
                                 
-                                let delta_event = ResponseEvent::OutputTextDelta {
+                                text_delta_event = Some(ResponseEvent::OutputTextDelta {
                                     content_index: 0,
                                     delta: content.clone(),
                                     item_id: this.item_id.clone(),
                                     output_index: 0,
                                     sequence_number: seq,
-                                };
-                                
-                                if this.pending_events.is_empty() {
-                                    return Poll::Ready(Some(Ok(delta_event)));
-                                }
-                                
-                                this.pending_events.push(delta_event);
-                                let first_event = this.pending_events.remove(0);
-                                return Poll::Ready(Some(Ok(first_event)));
+                                });
                             }
                             
                             // 检查是否完成
@@ -415,18 +408,32 @@ where
                                     sequence_number: seq4,
                                 };
                                 
+                                if let Some(delta) = text_delta_event {
+                                    this.pending_events.push(delta);
+                                }
+                                this.pending_events.push(text_done_event);
                                 this.pending_events.push(content_part_done_event);
                                 this.pending_events.push(output_item_done_event);
                                 this.pending_events.push(completed_event);
                                 *this.state = StreamState::Done;
                                 
-                                return Poll::Ready(Some(Ok(text_done_event)));
+                                let first_event = this.pending_events.remove(0);
+                                return Poll::Ready(Some(Ok(first_event)));
                             }
                         }
                         
+                        // 如果有待处理事件，先返回
                         if !this.pending_events.is_empty() {
+                            if let Some(delta) = text_delta_event {
+                                this.pending_events.push(delta);
+                            }
                             let first_event = this.pending_events.remove(0);
                             return Poll::Ready(Some(Ok(first_event)));
+                        }
+                        
+                        // 如果有文本增量，直接返回
+                        if let Some(delta) = text_delta_event {
+                            return Poll::Ready(Some(Ok(delta)));
                         }
                         
                         Poll::Pending
