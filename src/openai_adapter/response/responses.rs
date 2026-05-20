@@ -146,10 +146,10 @@ where
                 let seq = *this.sequence_number;
                 *this.sequence_number += 1;
                 
-                return Poll::Ready(Some(Ok(ResponseEvent::Created {
+                Poll::Ready(Some(Ok(ResponseEvent::Created {
                     response,
                     sequence_number: seq,
-                })));
+                })))
             }
             StreamState::InProgress => {
                 match this.inner.as_mut().poll_next(cx) {
@@ -231,7 +231,7 @@ where
                         this.pending_events.push(output_item_done_event);
                         this.pending_events.push(completed_event);
                         
-                        return Poll::Ready(Some(Ok(text_done_event)));
+                        Poll::Ready(Some(Ok(text_done_event)))
                     }
                     Poll::Ready(Some(Err(e))) => Poll::Ready(Some(Err(e))),
                     Poll::Ready(Some(Ok(chunk))) => {
@@ -298,29 +298,29 @@ where
                         
                         // 处理文本增量
                         if let Some(choice) = chunk.choices.first() {
-                            if let Some(content) = &choice.delta.content {
-                                if !content.is_empty() {
-                                    this.accumulated_text.push_str(content);
-                                    
-                                    let seq = *this.sequence_number;
-                                    *this.sequence_number += 1;
-                                    
-                                    let delta_event = ResponseEvent::OutputTextDelta {
-                                        content_index: 0,
-                                        delta: content.clone(),
-                                        item_id: this.item_id.clone(),
-                                        output_index: 0,
-                                        sequence_number: seq,
-                                    };
-                                    
-                                    if !this.pending_events.is_empty() {
-                                        this.pending_events.push(delta_event);
-                                        let first_event = this.pending_events.remove(0);
-                                        return Poll::Ready(Some(Ok(first_event)));
-                                    } else {
-                                        return Poll::Ready(Some(Ok(delta_event)));
-                                    }
+                            if let Some(content) = &choice.delta.content
+                                && !content.is_empty()
+                            {
+                                this.accumulated_text.push_str(content);
+                                
+                                let seq = *this.sequence_number;
+                                *this.sequence_number += 1;
+                                
+                                let delta_event = ResponseEvent::OutputTextDelta {
+                                    content_index: 0,
+                                    delta: content.clone(),
+                                    item_id: this.item_id.clone(),
+                                    output_index: 0,
+                                    sequence_number: seq,
+                                };
+                                
+                                if this.pending_events.is_empty() {
+                                    return Poll::Ready(Some(Ok(delta_event)));
                                 }
+                                
+                                this.pending_events.push(delta_event);
+                                let first_event = this.pending_events.remove(0);
+                                return Poll::Ready(Some(Ok(first_event)));
                             }
                             
                             // 检查是否完成
@@ -506,7 +506,7 @@ impl Clone for ResponseEvent {
 }
 
 pub fn response_event_sse_serialize(event: &ResponseEvent) -> Result<bytes::Bytes, OpenAIAdapterError> {
-    let mut buf = Vec::with_capacity(256);
+    let mut buf = Vec::with_capacity(512);
     
     // 添加事件类型
     let event_type = match event {
@@ -526,15 +526,20 @@ pub fn response_event_sse_serialize(event: &ResponseEvent) -> Result<bytes::Byte
     buf.extend_from_slice(event_type.as_bytes());
     buf.extend_from_slice(b"\n");
     
-    // 添加数据
+    // 添加数据：外层包装 {"event": "...", "data": {...}}
     buf.extend_from_slice(b"data: ");
-    serde_json::to_writer(&mut buf, event).map_err(OpenAIAdapterError::from)?;
+    let event_data = serde_json::to_value(event).map_err(OpenAIAdapterError::from)?;
+    let outer = serde_json::json!({
+        "event": event_type,
+        "data": event_data,
+    });
+    serde_json::to_writer(&mut buf, &outer).map_err(OpenAIAdapterError::from)?;
     buf.extend_from_slice(b"\n\n");
     
     Ok(bytes::Bytes::from(buf))
 }
 
-// 为了兼容性保留旧函数
-pub fn response_chunk_sse_serialize(_chunk: &super::super::types::ResponseChunk) -> Result<bytes::Bytes, OpenAIAdapterError> {
-    Ok(bytes::Bytes::new())
+#[allow(dead_code)]
+pub fn response_chunk_sse_serialize(_chunk: &super::super::types::ResponseChunk) -> bytes::Bytes {
+    bytes::Bytes::new()
 }
