@@ -526,14 +526,9 @@ pub fn response_event_sse_serialize(event: &ResponseEvent) -> Result<bytes::Byte
     buf.extend_from_slice(event_type.as_bytes());
     buf.extend_from_slice(b"\n");
     
-    // 添加数据：外层包装 {"event": "...", "data": {...}}
+    // 添加数据：直接序列化事件内容
     buf.extend_from_slice(b"data: ");
-    let event_data = serde_json::to_value(event).map_err(OpenAIAdapterError::from)?;
-    let outer = serde_json::json!({
-        "event": event_type,
-        "data": event_data,
-    });
-    serde_json::to_writer(&mut buf, &outer).map_err(OpenAIAdapterError::from)?;
+    serde_json::to_writer(&mut buf, event).map_err(OpenAIAdapterError::from)?;
     buf.extend_from_slice(b"\n\n");
     
     Ok(bytes::Bytes::from(buf))
