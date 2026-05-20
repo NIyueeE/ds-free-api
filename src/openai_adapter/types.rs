@@ -750,7 +750,7 @@ pub struct Response {
 #[derive(Debug, Serialize)]
 #[serde(tag = "type")]
 pub enum OutputItem {
-    #[serde(rename = "text")]
+    #[serde(rename = "output_text")]
     Text { text: String },
     #[serde(rename = "tool_call")]
     ToolCall {
