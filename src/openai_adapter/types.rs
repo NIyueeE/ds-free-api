@@ -732,12 +732,18 @@ pub struct ReasoningConfig {
 pub struct Response {
     pub id: String,
     pub object: &'static str,
-    pub created_at: f64,
-    pub model: String,
     pub status: &'static str,
+    pub created_at: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub service_tier: Option<&'static str>,
+    pub model: String,
     pub output: Vec<OutputItem>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub usage: Option<Usage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub instructions: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metadata: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -888,11 +894,14 @@ impl Clone for Response {
         Response {
             id: self.id.clone(),
             object: self.object,
-            created_at: self.created_at,
-            model: self.model.clone(),
             status: self.status,
+            created_at: self.created_at,
+            service_tier: self.service_tier,
+            model: self.model.clone(),
             output: self.output.clone(),
             usage: self.usage.clone(),
+            instructions: self.instructions.clone(),
+            max_output_tokens: self.max_output_tokens,
             metadata: self.metadata.clone(),
             error: self.error.clone(),
             incomplete_details: self.incomplete_details.clone(),
