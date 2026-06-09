@@ -1,0 +1,39 @@
+name: Build Linux Binary
+on: [push, workflow_dispatch]
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-latest # 👈 让 GitHub 用 Linux 服务器帮我们编
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Build Frontend Web
+        run: |
+          cd web
+          npm install
+          npm run build
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+
+      - name: Install Build Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake perl pkg-config libssl-dev
+
+      - name: Run Build
+        run: cargo build --release
+
+      - name: Upload Linux Binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: my-fixed-linux-binary
+          path: target/release/ds-free-api # 👈 注意：Linux 编译产物没有 .exe 后缀
