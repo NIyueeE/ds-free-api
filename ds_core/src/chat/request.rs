@@ -5,6 +5,7 @@
 //! - 分块路径（v0_chat_oversized_chunk）：超限 expert 模型，分块 completion 写入
 
 use std::pin::Pin;
+use std::time::Instant;
 
 use bytes::Bytes;
 use futures::{Stream, StreamExt};
@@ -526,6 +527,7 @@ impl Chat {
         );
 
         // 2. 创建临时 session
+        let session_start = Instant::now();
         let session_id = match self.accounts.create_session(&token).await {
             Ok(id) => id,
             Err(e) => {
@@ -533,12 +535,14 @@ impl Chat {
                 return Err(e);
             }
         };
+        let session_create_ms = session_start.elapsed().as_millis();
         // 从这里起，任何提前返回都由守卫负责删除 session
         let mut session_guard =
             SessionGuard::new(self.accounts.client_clone().await, &token, &session_id);
-        log::debug!(
+        log::info!(
             target: "ds_core::accounts",
-            "req={} 创建 session: id={}", request_id, session_id
+            "req={} session_created: id={}, create_ms={}, account={}",
+            request_id, session_id, session_create_ms, account_id
         );
 
         // 3. 上传文件：先历史文件，再外部文件
@@ -595,6 +599,7 @@ impl Chat {
         }
 
         // 4. 计算 PoW
+        let pow_start = Instant::now();
         let pow_header = match self
             .accounts
             .compute_pow_for_target(&token, "/api/v0/chat/completion")
@@ -606,6 +611,7 @@ impl Chat {
                 return Err(e);
             }
         };
+        let pow_ms = pow_start.elapsed().as_millis();
 
         // 5. 发起 completion
         let completion_prompt: &str = if history_upload_failed {
@@ -625,6 +631,7 @@ impl Chat {
             preempt: false,
         };
 
+        let completion_start = Instant::now();
         let mut raw_stream = match self
             .accounts
             .completion(&token, &pow_header, &payload)
@@ -687,6 +694,8 @@ impl Chat {
 
         let (_, stop_id) = parse_ready_message_ids(ready_block.as_bytes());
 
+        let ready_ms = completion_start.elapsed().as_millis();
+
         // 7. 检查 hint 事件
         if let Some(err) = check_hint(&second_block) {
             if let CoreError::Overloaded = &err {
@@ -711,16 +720,19 @@ impl Chat {
                     "req={} hint 错误: {}", request_id, hint_detail
                 );
             }
-            log::debug!(
+            let hint_ms = completion_start.elapsed().as_millis();
+            log::info!(
                 target: "ds_core::accounts",
-                "req={} hint 后清理 session: id={}", request_id, session_id
+                "req={} hint_error_cleanup: session_id={}, pow_ms={}, hint_ms={}, session_create_ms={}, total_ms={}",
+                request_id, session_id, pow_ms, hint_ms, session_create_ms, session_create_ms + hint_ms
             );
             return Err(err);
         }
 
-        log::debug!(
+        log::info!(
             target: "ds_core::accounts",
-            "req={} SSE ready: resp_msg={}", request_id, stop_id
+            "req={} sse_ready: resp_msg={}, pow_ms={}, completion_ms={}, session_create_ms={}, total_ms={}",
+            request_id, stop_id, pow_ms, ready_ms, session_create_ms, session_create_ms + ready_ms
         );
 
         // 8. 注册活跃 session

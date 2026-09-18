@@ -1,0 +1,69 @@
+name: Testing Help Wanted
+description: Request help from community for real-world testing with DeepSeek accounts
+title: "[Testing] Need DeepSeek accounts for ban pattern reproduction"
+labels: ["testing", "help-wanted", "ban-prevention"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## 🎯 Goal
+        We need **4 DeepSeek accounts with unique device_ids** to reproduce the account banning patterns reported in issue #112 and validate our mitigation strategies (sliding window rate limiter, coordinated retry, session reuse).
+
+        ## 📋 What We Need
+        - **4 DeepSeek accounts** (email/password + device_id)
+        - Each account must have a **unique device_id** (captured from real browser login)
+        - Accounts should be **fresh/unused** or lightly used
+        - Willing to run ~24 hour test (2 requests per account, 6-10s delay)
+
+        ## 🔧 What We Provide
+        - Test configuration with safe defaults (`hourly_request_quota=10`)
+        - Detailed runbook: `TESTING_REPRODUCTION.md`
+        - Instrumented logging for full observability
+        - Secure credential handling (we never see your passwords)
+
+        ## ⏱️ Time Commitment
+        - **Setup**: ~15 minutes (fill config, start server)
+        - **Active test**: ~5 minutes (send 8 requests total)
+        - **Monitoring**: Periodic checks over 12-24 hours
+        - **Reporting**: Fill template with results
+
+        ## 🛡️ Security
+        - **Never share credentials** in chat/GitHub
+        - Use **encrypted file** (age/sops) or run test locally
+        - We only need **logs and results**, not credentials
+        - You keep full control of your accounts
+
+        ## 📊 What We'll Learn
+        1. Does sliding window reduce bans vs fixed window?
+        2. Does session create/delete pattern trigger risk control?
+        3. Do coordinated retries help during 429/5xx?
+        4. Real-world data for GitHub issue comments
+
+        ## 🙋 How to Help
+        **Option A: Run locally** (recommended)
+        1. Clone repo, copy `config.example.testing.toml` → `config.toml`
+        2. Fill in your 4 accounts
+        3. Run `cargo run` and follow `TESTING_REPRODUCTION.md`
+        4. Share anonymized logs/results
+
+        **Option B: Provide accounts to maintainer**
+        - Encrypt credentials with maintainer's public key
+        - Maintainer runs test in isolated environment
+        - You get full report
+
+        **Option C: Just share observations**
+        - If you're already using ds-free-api and seeing bans
+        - Share your config (sanitized) and ban patterns
+
+        ## 📝 Response Format
+        Please reply with:
+        - ✅ I can run the test locally
+        - ✅ I can provide encrypted accounts
+        - ✅ I can share observations from my usage
+        - ❌ Not able to help
+
+        ## 🔗 References
+        - Issue #112: "Liang大人依旧精准封号"
+        - Issue #102: "跑一会就禁言，求规避策略"
+        - `TESTING_REPRODUCTION.md` in repo
+        - `config.example.testing.toml` for safe defaults

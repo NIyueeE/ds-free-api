@@ -2,7 +2,9 @@
 //!
 //! 1 account = 1 session = 1 concurrency。多并发需横向扩展账号数。
 
+use std::collections::VecDeque;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicI64, AtomicU8, AtomicU64, Ordering};
 use std::time::SystemTime;
 
@@ -53,12 +55,52 @@ pub struct AccountStatus {
     pub state: String,
     /// 最后释放时间戳（ms），0 表示从未使用
     pub last_released_ms: i64,
+    /// 窗口起点（Unix 秒）
+    pub window_started_at: i64,
+    /// 窗口内剩余秒数
+    pub window_remaining_secs: i64,
+    /// 总请求数（累计）
+    pub total_requests: u64,
+    /// 首次请求时间戳（ms）
+    pub first_request_ms: i64,
+    /// 最后请求时间戳（ms）
+    pub last_request_ms: i64,
+    /// 最近请求间隔（秒）
+    pub recent_intervals: Vec<i64>,
     /// 连续登录失败次数
     pub error_count: u8,
     /// 当前配额窗口内已用请求数
     pub used_this_hour: u64,
     /// 本窗口是否已用尽配额（0 配额 = 不限制，恒为 false）
     pub quota_exhausted: bool,
+}
+
+impl AccountStatus {
+    fn from_account(account: &Account, hourly_quota: u64) -> Self {
+        let (total, window_used, first, last, intervals) = account.window.get_stats();
+        // For sliding window, compute window start as earliest timestamp in current window
+        let window_started = {
+            let now = now_secs();
+            let ts = account.window.timestamps.lock().unwrap();
+            ts.front().copied().unwrap_or(now)
+        };
+        let window_remaining = (window_started + WINDOW_SECS as i64 - now_secs()).max(0);
+        Self {
+            email: account.email.clone(),
+            mobile: account.mobile.clone(),
+            state: account.state().as_str().to_string(),
+            last_released_ms: account.last_released.load(Ordering::Relaxed),
+            window_started_at: window_started,
+            window_remaining_secs: window_remaining,
+            total_requests: total,
+            first_request_ms: first * 1000,
+            last_request_ms: last * 1000,
+            recent_intervals: intervals,
+            error_count: account.error_count.load(Ordering::Relaxed),
+            used_this_hour: window_used,
+            quota_exhausted: !account.within_quota(hourly_quota),
+        }
+    }
 }
 
 pub struct Account {
@@ -72,69 +114,115 @@ pub struct Account {
     error_count: AtomicU8,
     /// 原始凭据（用于重新登录）
     creds: AccountConfig,
-    /// 滑动窗口内的请求计数（用于每小时配额）
-    window: RequestWindow,
+    /// 滑动窗口限流器（用于每小时配额）
+    window: SlidingWindowRateLimiter,
 }
 
 /// 连续登录失败上限，达到后标记为 Invalid
 const MAX_ERROR_COUNT: u8 = 3;
 
-/// 一小时滑动窗口请求计数器
-///
-/// 背景：实测同一账号累计约 215 次请求后会被上游禁言（`biz_code=5`），
-/// 且禁言是**延迟判定**的（跑完才封）。因此需要主动限制单位时间内的请求量。
-///
-/// 实现为「固定起点 + 一小时」的简单窗口：窗口内计数达到上限后该账号
-/// 暂时不可用，窗口过期自动恢复。精度足够（不需要令牌桶的平滑性），
-/// 且可用纯原子操作实现，不加锁。
-struct RequestWindow {
-    /// 窗口起点（Unix 秒）
-    started_at: AtomicI64,
-    /// 窗口内累计请求数
-    count: AtomicU64,
-}
-
-impl RequestWindow {
-    fn new() -> Self {
-        Self {
-            started_at: AtomicI64::new(now_secs()),
-            count: AtomicU64::new(0),
-        }
-    }
-
-    /// 记一次请求并返回窗口内的累计值；跨窗口时自动重置
-    fn record(&self) -> u64 {
-        let now = now_secs();
-        let start = self.started_at.load(Ordering::Relaxed);
-        if now - start >= WINDOW_SECS
-            && self
-                .started_at
-                .compare_exchange(start, now, Ordering::Relaxed, Ordering::Relaxed)
-                .is_ok()
-        {
-            self.count.store(0, Ordering::Relaxed);
-        }
-        self.count.fetch_add(1, Ordering::Relaxed) + 1
-    }
-
-    /// 当前窗口内已用请求数（不修改状态）
-    fn used(&self) -> u64 {
-        if now_secs() - self.started_at.load(Ordering::Relaxed) >= WINDOW_SECS {
-            0
-        } else {
-            self.count.load(Ordering::Relaxed)
-        }
-    }
-}
-
 /// 配额窗口长度：1 小时
-const WINDOW_SECS: i64 = 3600;
+const WINDOW_SECS: u64 = 3600;
 
 fn now_secs() -> i64 {
     SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() as i64
+}
+
+/// 严格滑动窗口限流器
+///
+/// 保证：任意时刻，最近 `WINDOW_SECS` 秒内的请求数 ≤ 配额
+/// 使用 VecDeque 存储请求时间戳（Unix 秒），自动清理过期项。
+///
+/// 设计为无锁读 + 细粒度锁写，适合高并发场景。
+struct SlidingWindowRateLimiter {
+    timestamps: Mutex<VecDeque<i64>>,
+    /// 总请求数（累计，跨窗口）
+    total_count: AtomicU64,
+    /// 首次请求时间戳（Unix 秒）
+    first_request_at: AtomicI64,
+    /// 最后请求时间戳（Unix 秒）
+    last_request_at: AtomicI64,
+    /// 请求间隔记录（最近 10 个，Unix 秒差值）
+    recent_intervals: Mutex<Vec<i64>>,
+}
+
+impl SlidingWindowRateLimiter {
+    fn new() -> Self {
+        Self {
+            timestamps: Mutex::new(VecDeque::new()),
+            total_count: AtomicU64::new(0),
+            first_request_at: AtomicI64::new(0),
+            last_request_at: AtomicI64::new(0),
+            recent_intervals: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn record_interval(&self, now: i64) {
+        let last = self.last_request_at.swap(now, Ordering::Relaxed);
+        if last > 0 {
+            let interval = now - last;
+            if let Ok(mut intervals) = self.recent_intervals.lock() {
+                intervals.push(interval);
+                if intervals.len() > 10 {
+                    intervals.remove(0);
+                }
+            }
+        }
+        let first = self.first_request_at.load(Ordering::Relaxed);
+        if first == 0 {
+            self.first_request_at.store(now, Ordering::Relaxed);
+        }
+    }
+
+    fn get_stats(&self) -> (u64, u64, i64, i64, Vec<i64>) {
+        let total = self.total_count.load(Ordering::Relaxed);
+        let window_used = self.used();
+        let first = self.first_request_at.load(Ordering::Relaxed);
+        let last = self.last_request_at.load(Ordering::Relaxed);
+        let intervals = self
+            .recent_intervals
+            .lock()
+            .map(|v| v.clone())
+            .unwrap_or_default();
+        (total, window_used, first, last, intervals)
+    }
+
+    /// 记一次请求并返回窗口内的累计值；自动清理过期时间戳
+    fn record(&self) -> u64 {
+        let now = now_secs();
+        let mut ts = self.timestamps.lock().unwrap();
+        let cutoff = now - WINDOW_SECS as i64;
+
+        // 清理过期时间戳
+        while ts.front().is_some_and(|&t| t < cutoff) {
+            ts.pop_front();
+        }
+
+        ts.push_back(now);
+        let window_used = ts.len() as u64;
+
+        drop(ts); // 释放锁
+
+        self.total_count.fetch_add(1, Ordering::Relaxed);
+        self.record_interval(now);
+        window_used
+    }
+
+    /// 当前窗口内已用请求数（不修改状态）
+    fn used(&self) -> u64 {
+        let now = now_secs();
+        let mut ts = self.timestamps.lock().unwrap();
+        let cutoff = now - WINDOW_SECS as i64;
+
+        while ts.front().is_some_and(|&t| t < cutoff) {
+            ts.pop_front();
+        }
+
+        ts.len() as u64
+    }
 }
 
 impl Account {
@@ -183,7 +271,7 @@ impl Account {
     }
 
     /// 创建一个 Invalid 状态的账号（初始化失败时使用，仍加入池以便前台展示）
-    fn new_invalid(creds: AccountConfig) -> Self {
+    fn new_invalid(creds: AccountConfig, _hourly_quota: u64) -> Self {
         Self {
             token: std::sync::RwLock::new(String::new().into()),
             email: creds.email.clone(),
@@ -192,8 +280,12 @@ impl Account {
             last_released: AtomicI64::new(0),
             error_count: AtomicU8::new(MAX_ERROR_COUNT),
             creds,
-            window: RequestWindow::new(),
+            window: SlidingWindowRateLimiter::new(),
         }
+    }
+
+    fn get_total_requests(&self) -> u64 {
+        self.window.total_count.load(Ordering::Relaxed)
     }
 }
 
@@ -317,7 +409,7 @@ impl AccountPool {
                         Err(e) => {
                             warn!(target: "ds_core::accounts", "Account {} initialization failed: {}", display_id, e);
                             // 即使初始化失败也加入池，标记为 Invalid 以便前台展示
-                            Account::new_invalid(creds.clone())
+                            Account::new_invalid(creds.clone(), self.hourly_quota)
                         }
                     };
                     Some((display_id, Arc::new(account)))
@@ -429,6 +521,11 @@ impl AccountPool {
             }
             // 超出每小时配额的账号本窗口内不再分配（0 = 不限制）
             if !account.within_quota(self.hourly_quota) {
+                debug!(
+                    target: "ds_core::accounts",
+                    "Account {} quota exhausted (used={}, limit={}), skipping",
+                    account.display_id(), account.window.used(), self.hourly_quota
+                );
                 continue;
             }
             let idle = now_ms - account.last_released.load(Ordering::Relaxed);
@@ -449,6 +546,14 @@ impl AccountPool {
             )
             .ok()?;
         account.record_request(self.hourly_quota);
+        debug!(
+            target: "ds_core::accounts",
+            "Account {} allocated for request (used_this_window={}, total={}, idle_ms={})",
+            account.display_id(),
+            account.window.used(),
+            account.get_total_requests(),
+            now_ms - account.last_released.load(Ordering::Relaxed)
+        );
         Some(AccountGuard { account })
     }
 
@@ -456,18 +561,15 @@ impl AccountPool {
     pub fn account_statuses(&self) -> Vec<AccountStatus> {
         self.accounts
             .iter()
-            .map(|entry| {
-                let a = entry.value();
-                AccountStatus {
-                    email: a.email.clone(),
-                    mobile: a.mobile.clone(),
-                    state: a.state().as_str().to_string(),
-                    last_released_ms: a.last_released.load(Ordering::Relaxed),
-                    error_count: a.error_count.load(Ordering::Relaxed),
-                    used_this_hour: a.window.used(),
-                    quota_exhausted: !a.within_quota(self.hourly_quota),
-                }
-            })
+            .map(|entry| AccountStatus::from_account(entry.value(), self.hourly_quota))
+            .collect()
+    }
+
+    /// 获取所有账号的详细状态（含统计信息）
+    pub fn account_statuses_detailed(&self) -> Vec<AccountStatus> {
+        self.accounts
+            .iter()
+            .map(|entry| AccountStatus::from_account(entry.value(), self.hourly_quota))
             .collect()
     }
 
@@ -697,7 +799,7 @@ async fn try_init_account(
         last_released: AtomicI64::new(0),
         error_count: AtomicU8::new(0),
         creds: creds.clone(),
-        window: RequestWindow::new(),
+        window: SlidingWindowRateLimiter::new(),
     })
 }
 
@@ -776,8 +878,8 @@ mod tests {
     }
 
     #[test]
-    fn window_counts_and_reports_usage() {
-        let w = RequestWindow::new();
+    fn sliding_window_counts_and_reports_usage() {
+        let w = SlidingWindowRateLimiter::new();
         assert_eq!(w.used(), 0);
         assert_eq!(w.record(), 1);
         assert_eq!(w.record(), 2);
@@ -786,7 +888,7 @@ mod tests {
 
     #[test]
     fn quota_of_zero_means_unlimited() {
-        let a = Account::new_invalid(account("a@example.com", "dev"));
+        let a = Account::new_invalid(account("a@example.com", "dev"), 0);
         for _ in 0..500 {
             a.record_request(0);
         }
@@ -795,7 +897,7 @@ mod tests {
 
     #[test]
     fn account_is_blocked_after_reaching_quota() {
-        let a = Account::new_invalid(account("a@example.com", "dev"));
+        let a = Account::new_invalid(account("a@example.com", "dev"), 3);
         let limit = 3;
         assert!(a.within_quota(limit));
         a.record_request(limit);
@@ -807,15 +909,21 @@ mod tests {
     }
 
     #[test]
-    fn expired_window_resets_usage() {
-        let w = RequestWindow::new();
+    fn expired_sliding_window_resets_usage() {
+        let w = SlidingWindowRateLimiter::new();
         for _ in 0..5 {
             w.record();
         }
         assert_eq!(w.used(), 5);
-        // 把窗口起点拨回过去，模拟窗口过期
-        w.started_at
-            .store(now_secs() - WINDOW_SECS - 1, Ordering::Relaxed);
+        // 手动插入旧时间戳模拟窗口过期
+        let now = now_secs();
+        let mut ts = w.timestamps.lock().unwrap();
+        ts.clear();
+        // 插入 1 小时前的时间戳
+        for _ in 0..5 {
+            ts.push_back(now - WINDOW_SECS as i64 - 100);
+        }
+        drop(ts);
         assert_eq!(w.used(), 0, "窗口过期后用量应视作 0");
         assert_eq!(w.record(), 1, "过期后重新计数应从 1 开始");
     }
@@ -852,7 +960,7 @@ mod tests {
             last_released: AtomicI64::new(0),
             error_count: AtomicU8::new(0),
             creds: account(email, "dev"),
-            window: RequestWindow::new(),
+            window: SlidingWindowRateLimiter::new(),
         })
     }
 

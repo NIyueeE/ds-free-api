@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
+use std::time::Instant;
 
 use bytes::Bytes;
 use futures::{Stream, StreamExt};
@@ -55,6 +56,7 @@ pub(crate) struct SessionHandle {
 
 impl SessionHandle {
     fn cleanup(&self, finished: bool) {
+        let start = Instant::now();
         self.sessions.lock().unwrap().remove(&self.session_id);
         let client = self.client.clone();
         let token = self.token.clone();
@@ -74,6 +76,11 @@ impl SessionHandle {
             if let Err(e) = client.delete_session(&token, &session_id).await {
                 log::warn!(target: "ds_core::accounts", "delete_session failed: {}", e);
             }
+            log::info!(
+                target: "ds_core::accounts",
+                "session_deleted: id={}, finished={}, cleanup_ms={}",
+                session_id, finished, start.elapsed().as_millis()
+            );
         });
     }
 }

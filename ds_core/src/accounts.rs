@@ -231,6 +231,10 @@ impl Accounts {
         self.pool.account_statuses()
     }
 
+    pub fn account_statuses_detailed(&self) -> Vec<AccountStatus> {
+        self.pool.account_statuses_detailed()
+    }
+
     pub async fn add_account(&self, creds: &AccountConfig) -> Result<String, PoolError> {
         let client = self.client.read().await;
         let solver = self.solver.read().await;

@@ -133,6 +133,10 @@ fn build_router(state: AppState, cors_origins: Vec<String>) -> Router {
     let admin_store = state.store.clone();
     let admin_routes = Router::new()
         .route("/admin/api/status", get(admin::admin_status))
+        .route(
+            "/admin/api/account-statuses-detailed",
+            get(admin::admin_account_statuses_detailed),
+        )
         .route("/admin/api/stats", get(admin::admin_stats))
         .route("/admin/api/models", get(admin::admin_models))
         .route("/admin/api/config", get(admin::admin_config))

@@ -39,6 +39,13 @@ pub struct AdminStatusResponse {
 }
 
 #[derive(Serialize)]
+pub struct AdminAccountStatusesDetailedResponse {
+    pub accounts: Vec<ds_core::AccountStatus>,
+    pub total: usize,
+    pub window_seconds: u64,
+}
+
+#[derive(Serialize)]
 pub struct AdminStatsResponse {
     #[serde(flatten)]
     pub stats: super::stats::StatsSnapshot,
@@ -245,6 +252,20 @@ pub(crate) async fn admin_status(State(state): State<AppState>) -> Response {
         busy,
         error,
         invalid,
+    };
+    json_response(&resp)
+}
+
+/// GET /admin/api/account-statuses-detailed
+/// Returns detailed account status including sliding window stats,
+/// request intervals, and quota usage. Useful for testing and debugging.
+pub(crate) async fn admin_account_statuses_detailed(State(state): State<AppState>) -> Response {
+    let statuses = state.adapter.account_statuses_detailed();
+    let total = statuses.len();
+    let resp = AdminAccountStatusesDetailedResponse {
+        accounts: statuses,
+        total,
+        window_seconds: 3600,
     };
     json_response(&resp)
 }

@@ -73,6 +73,12 @@ impl DsCore {
         self.accounts.account_statuses()
     }
 
+    /// 获取详细账号状态（含滑动窗口统计、请求间隔等）
+    #[must_use]
+    pub fn account_statuses_detailed(&self) -> Vec<AccountStatus> {
+        self.accounts.account_statuses_detailed()
+    }
+
     /// 动态添加账号
     pub async fn add_account(&self, creds: &AccountConfig) -> Result<String, PoolError> {
         self.accounts.add_account(creds).await

@@ -349,6 +349,11 @@ impl OpenAIAdapter {
         self.ds_core.account_statuses()
     }
 
+    /// 获取 ds_core 账号池详细状态（含滑动窗口统计、请求间隔等）
+    pub fn account_statuses_detailed(&self) -> Vec<ds_core::AccountStatus> {
+        self.ds_core.account_statuses_detailed()
+    }
+
     /// 动态添加账号
     pub async fn add_account(
         &self,

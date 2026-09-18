@@ -1,0 +1,89 @@
+# Testing Configuration for ds-free-api
+# Copy to config.toml and fill in your test account credentials
+#
+# This config uses SAFE DEFAULTS for testing:
+# - Lower hourly quota (10 req/hour/account) to avoid triggering bans during tests
+# - Sliding window rate limiter (smoother than fixed window)
+# - Verbose logging for observability
+# - Short timeouts for faster feedback
+
+[server]
+host = "127.0.0.1"
+port = 22217
+
+# Add your test API key here (generate one in Admin UI after first login)
+# [[api_keys]]
+# key = "sk-test-your-key-here"
+# description = "testing"
+
+[ds_core]
+# === TEST ACCOUNTS ===
+# Add 2-4 test accounts here. Each account MUST have:
+# - email OR mobile + area_code
+# - password
+# - device_id (REQUIRED - get from real browser login)
+#
+# Example structure (REPLACE with your real credentials):
+# [[ds_core.accounts]]
+# email = "test1@example.com"
+# mobile = ""
+# area_code = ""
+# password = "your_password_here"
+# device_id = "your_real_device_id_from_browser_here"
+
+# [[ds_core.accounts]]
+# email = "test2@example.com"
+# mobile = ""
+# area_code = ""
+# password = "your_password_here"
+# device_id = "different_device_id_for_this_account"
+
+# [[ds_core.accounts]]
+# email = "test3@example.com"
+# mobile = ""
+# area_code = ""
+# password = "your_password_here"
+# device_id = "another_unique_device_id"
+
+# [[ds_core.accounts]]
+# email = "test4@example.com"
+# mobile = ""
+# area_code = ""
+# password = "your_password_here"
+# device_id = "fourth_unique_device_id"
+
+# === RATE LIMITING (SAFE DEFAULTS FOR TESTING) ===
+# Hourly request quota per account (0 = unlimited)
+# DEFAULT: 10 (very conservative for testing, avoids triggering bans)
+# Production default is 60. Increase only after verifying stability.
+hourly_request_quota = 10
+
+# Use sliding window rate limiter (true = recommended)
+# Sliding window avoids burst at hour boundaries, smoother distribution
+# sliding_window = true  # Currently the only implementation
+
+# === MODEL CONFIG ===
+# Only "default" is enabled upstream. expert/vision are disabled.
+model_types = ["default"]
+max_input_tokens = [1048576]
+max_output_tokens = [384000]
+input_character_limits = [2621440]
+
+# === SEARCH MODE ===
+# Default: true (historical behavior - always search)
+# Set false for strict OpenAI semantics (search only when explicitly requested)
+default_search_enabled = true
+
+# === UPSTREAM API ===
+api_base = "https://chat.deepseek.com/api/v0"
+wasm_url = "https://fe-static.deepseek.com/chat/static/sha3_wasm_bg.7b9ca65ddd.wasm"
+user_agent = "DeepSeek/2.1.1 Android/35"
+client_version = "2.0.0"
+client_platform = "android"
+client_locale = "zh_CN"
+
+# === TOOL CALL TAGS ===
+# Defaults cover common variants. Add more if your client uses different tags.
+[ds_core.tool_call]
+extra_starts = ["<|tool_call_begin|>", "<tool_calls>", "<tool_call>"]
+extra_ends = ["<|tool_call_end|>", "</tool_calls>", "</tool_call>
